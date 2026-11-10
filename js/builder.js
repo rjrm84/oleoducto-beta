@@ -562,7 +562,9 @@
     });
   };
 
-  async function elevations(points, onProg) {
+  // Open-Meteo cuenta cada coordenada: el plan gratuito admite ~600 por minuto. Se espacian los pedidos
+  // y, ante un 429, se espera un minuto y se reintenta.
+  async function elevations(points, onProg, paceMs, onWait) {
     const out = [];
     for (let i = 0; i < points.length; i += 100) {
       const ch = points.slice(i, i + 100);
@@ -571,6 +573,7 @@
       for (;;) {
         try {
           const r = await fetch(url);
+          if (r.status === 429 && tries < 4) { tries++; if (onWait) onWait(); await sleep(62000); continue; }
           if (!r.ok) throw new Error('HTTP ' + r.status);
           const j = await r.json();
           if (!j.elevation || j.elevation.length !== ch.length) throw new Error('respuesta incompleta');
@@ -582,7 +585,7 @@
         }
       }
       onProg(Math.min(points.length, i + 100), points.length);
-      await sleep(160);
+      if (i + 100 < points.length) await sleep(paceMs || 400);
     }
     return out;
   }
@@ -595,7 +598,7 @@
     const bar = prog.firstElementChild;
     try {
       spec.lengthKm = G.routeLength(spec.route);
-      const stepKm = Math.max(0.1, Math.min(2, spec.lengthKm / 400));
+      const stepKm = Math.max(0.1, Math.min(3, spec.lengthKm / 300));
       const pts = G.samplePoints(spec.route, stepKm);
       const wantGrid = $('tz-grid').checked;
       spec.noTerrain = !wantGrid;
@@ -608,29 +611,41 @@
         const mgKm = spanKm * 0.38 + 3;
         grid = { latMin: laMin - mgKm / 110.57, latMax: laMax + mgKm / 110.57, lonMin: loMin - mgKm / kx, lonMax: loMax + mgKm / kx };
         const wKm = (grid.lonMax - grid.lonMin) * kx, hKm = (grid.latMax - grid.latMin) * 110.57;
-        const N = 1600;
+        const N = 900;
         grid.nx = Math.max(12, Math.min(60, Math.round(Math.sqrt((N * wKm) / hKm))));
         grid.ny = Math.max(12, Math.min(60, Math.round(N / grid.nx)));
         for (let j = 0; j < grid.ny; j++) for (let i = 0; i < grid.nx; i++) gpts.push({ lat: grid.latMin + ((grid.latMax - grid.latMin) * j) / (grid.ny - 1), lon: grid.lonMin + ((grid.lonMax - grid.lonMin) * i) / (grid.nx - 1) });
       }
-      const total = pts.length + gpts.length;
-      msg.textContent = `Bajando cotas: ${pts.length} puntos del trazado${gpts.length ? ` y ${gpts.length} de la grilla de terreno` : ''}…`;
-      const e1 = await elevations(pts, (k) => { bar.style.width = (k / total) * 100 + '%'; });
-      let e2 = [];
-      if (gpts.length) e2 = await elevations(gpts, (k) => { bar.style.width = ((pts.length + k) / total) * 100 + '%'; });
+      const waitMsg = () => { const el = $('tz-msg'); if (el) el.textContent = 'El servicio de altimetría pide una pausa: reintento en un minuto…'; };
+      msg.textContent = `Bajando ${pts.length} cotas del trazado…`;
+      const e1 = await elevations(pts, (k) => { bar.style.width = (k / pts.length) * 100 + '%'; }, 1200, waitMsg);
       spec.profile = pts.map((p, i) => ({ pk: p.pk, lat: p.lat, lon: p.lon, elev: Math.round(Number(e1[i]) || 0) }));
-      if (grid) { grid.elev = e2.map((v) => Math.round(Number(v) || 0)); spec.terrain = grid; }
       spec.profileStale = false; spec.profileApprox = false;
+      spec.terrain = null;
       // estaciones fuera del nuevo largo
       const term = spec.stations.find((x) => x.kind === 'terminal');
       if (term) term.pk = +spec.lengthKm.toFixed(1);
       for (const s of spec.stations) if (s.pk > spec.lengthKm) s.pk = +spec.lengthKm.toFixed(1);
       spec.valves = spec.valves.filter((v) => v.pk < spec.lengthKm);
       markDirty();
-      msg.textContent = `Listo: ${pts.length} cotas cada ${fmt(stepKm, 2)} km${grid ? ` y grilla 3D de ${grid.nx}×${grid.ny}` : ''}. Fuente: Copernicus GLO-90 vía Open-Meteo.`;
+      msg.textContent = `Listo: ${pts.length} cotas cada ${fmt(stepKm, 2)} km. Fuente: Copernicus GLO-90 vía Open-Meteo.` + (grid ? ' Ahora bajo la grilla de terreno para la vista 3D: podés seguir con los otros pasos.' : '');
       tzOut();
       $('tz-prof').innerHTML = profileSvg({ valves: false });
       if (!spec.stations.length) toast('Altimetría lista. Seguí con el caño y después proponé las estaciones');
+      if (grid) {
+        const owner = spec;
+        bar.style.width = '0';
+        const gm = (t) => { const el = $('tz-msg'); if (el && spec === owner) el.textContent = t; };
+        elevations(gpts, (k, n) => { const b2 = $('tz-prog'); if (b2) { b2.hidden = false; b2.firstElementChild.style.width = (k / n) * 100 + '%'; } gm(`Grilla de terreno 3D: ${k} de ${n} puntos (el servicio gratuito limita el ritmo, tarda un par de minutos)…`); }, 10500, () => gm('El servicio de altimetría pide una pausa: reintento en un minuto…'))
+          .then((e2) => {
+            if (spec !== owner) { owner.terrain = Object.assign(grid, { elev: e2.map((v) => Math.round(Number(v) || 0)) }); G.lib.save(owner); return; }
+            grid.elev = e2.map((v) => Math.round(Number(v) || 0)); spec.terrain = grid; markDirty(); tzOut();
+            gm(`Listo: perfil de ${spec.profile.length} cotas y grilla 3D de ${grid.nx}×${grid.ny}. Fuente: Copernicus GLO-90 vía Open-Meteo.`);
+            const b2 = $('tz-prog'); if (b2) b2.hidden = true;
+            toast('Grilla de terreno 3D lista');
+          })
+          .catch((err) => gm('No se pudo bajar la grilla 3D (' + err.message + '): la vista 3D usará un relieve aproximado.'));
+      }
     } catch (err) {
       msg.textContent = 'No se pudo bajar la altimetría (' + err.message + '). Revisá la conexión o cargá el perfil a mano más abajo.';
     } finally {

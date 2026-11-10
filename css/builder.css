@@ -96,7 +96,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .b-mapwrap { position: relative; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); background: #1a2126; }
 .b-map { height: min(62vh, 620px); min-height: 340px; }
 .b-map-msg { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 20px; color: var(--mute); }
-.b-maptools { position: absolute; z-index: 600; top: 10px; left: 54px; right: 10px; display: flex; gap: 6px; flex-wrap: wrap; pointer-events: none; }
+.b-maptools { position: absolute; z-index: 600; top: 10px; left: 54px; right: 64px; display: flex; gap: 6px; flex-wrap: wrap; pointer-events: none; }
 .b-maptools > * { pointer-events: auto; }
 .b-maptools .b-btn { background: rgba(13, 17, 20, 0.86); backdrop-filter: blur(6px); }
 .b-maptools .b-btn.on { background: var(--accent); color: var(--ink-0); }
