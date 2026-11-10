@@ -2,7 +2,54 @@
 (function (global) {
   'use strict';
 
-  const PLAN_M3H = 690; // 16.500 m³/d
+  let PLAN_M3H = 690; // 16.500 m³/d (en ductos a medida: plan diario / 24)
+
+  // v8: incidentes armados con las estaciones del ducto a medida
+  function customPool(sim) {
+    const crisis = (m) => () => sim.applyCrisisMode(m);
+    const M = sim.state.config._meta;
+    const sts = sim.sortedStations().slice().sort((a, b) => (a.pkKm || 0) - (b.pkKm || 0));
+    const H = sim.stationById('ph'), T = sim.stationById('lc'), CD = sim.stationById('cd');
+    const mids = sts.filter((x) => x.id !== 'ph' && x.pumps && x.pumps.length);
+    const q0 = M.defaultPhCabeceraM3h || 600;
+    const out = [];
+    if (mids.length) {
+      const m = mids[Math.floor(mids.length / 2)];
+      const nx = sts.find((x) => (x.pkKm || 0) > (m.pkKm || 0) && x.pumps && x.pumps.length) || T;
+      out.push({ id: 'eb', title: `Disparo eléctrico en ${m.name}`, brief: `Las bombas de ${m.name} (${m.shortName}) salieron de servicio. ${nx.name} empieza a perder aspiración y el caudal cae.`, start: () => sim.failStation(m.id), options: [
+        { label: 'Contener: bajar el caudal de cabecera', grade: 'ok', why: `Bajar el caudal protege la aspiración aguas abajo mientras se repone ${m.shortName}.`, act: crisis('contener') },
+        { label: 'Mantener el caudal y esperar', grade: 'bad', why: 'Sin esa estación, la aspiración aguas abajo colapsa y las EB disparan en cascada.', act: () => {} },
+        { label: 'Parada segura de toda la línea', grade: 'mid', why: 'Es seguro pero exagerado: se pierde todo el recibo por una falla local.', act: crisis('parar_seguro') },
+      ], repairH: 1.5 });
+    }
+    const vs = sim.state.valves.slice().sort((a, b) => a.pkKm - b.pkKm);
+    const lpk = vs.length > 1 ? Math.round((vs[Math.floor(vs.length / 2) - 1].pkKm + vs[Math.floor(vs.length / 2)].pkKm) / 2) : Math.round((M.lengthKm || 100) * 0.45);
+    out.push({ id: 'fuga', title: `Caída brusca de presión en el PK ${lpk}`, brief: `La presión cae en el PK ${lpk} y el balance de volumen no cierra. Puede ser una rotura del ducto.`, start: () => { sim.state._pendingRupturePk = lpk; sim.applyScenario('fuga_rotura_pk'); }, options: [
+      { label: 'Parar y aislar el tramo con las VB', grade: 'ok', why: 'Ante una posible rotura, primero se para y se aísla: limita el derrame.', act: () => { sim.applyCrisisMode('parar_seguro'); } },
+      { label: 'Subir el caudal para compensar la caída', grade: 'bad', why: 'Bombear más con una rotura activa aumenta el derrame.', act: () => sim.setFlowSetpoint(q0 * 1.05) },
+      { label: 'Contener: bajar caudal y observar', grade: 'mid', why: 'Reduce el derrame pero no lo detiene: el tramo sigue sin aislar.', act: crisis('contener') },
+    ], repairH: 3 });
+    out.push({ id: 'ph', title: `Cabecera ${H.shortName} fuera de servicio`, brief: `Se perdió el bombeo en ${H.name}. Sin cabecera, el crudo deja de avanzar.`, start: () => sim.failStation('ph'), options: CD ? [
+      { label: `Redistribuir: ${CD.shortName} como cabecera temporal`, grade: 'ok', why: `El tanque de ${CD.name} sostiene el bombeo unas horas hacia ${T.shortName}.`, act: crisis('redistribuir') },
+      { label: 'Parada segura de toda la línea', grade: 'mid', why: `Seguro, pero desaprovecha la autonomía de ${CD.shortName}.`, act: crisis('parar_seguro') },
+      { label: 'Subir el caudal en las estaciones intermedias', grade: 'bad', why: 'Sin cabecera no hay aspiración: las intermedias no pueden empujar.', act: () => {} },
+    ] : [
+      { label: 'Parada segura y rearme en rampa', grade: 'ok', why: 'Sin cabecera alternativa, lo correcto es parar ordenado y rearrancar en rampa.', act: crisis('parar_seguro') },
+      { label: 'Mantener las intermedias en marcha', grade: 'bad', why: 'Sin aspiración las bombas cavitan y disparan.', act: () => {} },
+      { label: 'Contener: bajar caudal', grade: 'mid', why: 'Ayuda, pero sin cabecera la línea igual se detiene.', act: crisis('contener') },
+    ], repairH: 2 });
+    out.push({ id: 'surge', title: 'Golpe de ariete tras una parada', brief: 'Una onda de sobrepresión recorre la línea: las estaciones se acercan al 90 % de la MAOP.', start: () => sim.applyScenario('sobrepresion_surge'), options: [
+      { label: 'Contener: reducir caudal e inyecciones', grade: 'ok', why: 'Bajar el caudal deja que la onda se amortigüe sin superar la MAOP.', act: crisis('contener') },
+      { label: 'Arrancar las bombas de reserva', grade: 'bad', why: 'Más bombeo suma presión justo cuando la línea está al límite.', act: () => sim.setFlowSetpoint(q0 * 1.06) },
+      { label: 'Cerrar rápido las VB del tramo', grade: 'bad', why: 'Un cierre rápido genera otro golpe de ariete.', act: () => {} },
+    ], repairH: 1 });
+    out.push({ id: 'pig', title: 'Pig detenido en el punto alto', brief: `El pig de limpieza se frenó en el PK ${Math.round(M.peakPkKm || 0)}, a ${Math.round(M.peakElevM || 0).toLocaleString('es-AR')} m. La presión detrás sube.`, start: () => sim.applyScenario('pig_stuck_peak'), options: [
+      { label: 'Empujarlo subiendo el caudal, vigilando la MAOP', grade: 'ok', why: 'Un aumento controlado de diferencial suele liberar el pig.', act: () => sim.setFlowSetpoint(q0) },
+      { label: 'Parar la línea y esperar', grade: 'mid', why: 'El pig queda atascado y el recibo se corta.', act: crisis('parar_seguro') },
+      { label: 'Ignorar la alarma', grade: 'bad', why: 'La presión detrás del pig sigue subiendo hasta disparar por MAOP.', act: () => {} },
+    ], repairH: 1.5 });
+    return out;
+  }
 
   function rng(seed) {
     let s = seed >>> 0;
@@ -10,6 +57,7 @@
   }
 
   function incidentPool(sim) {
+    if (sim.state.config._meta && sim.state.config._meta.custom) return customPool(sim);
     const crisis = (m) => () => sim.applyCrisisMode(m);
     return [
       {
@@ -77,6 +125,9 @@
 
   function createGame(app) {
     const sim = app.sim;
+    const GM = sim.state.config._meta || {};
+    if (GM.custom) PLAN_M3H = (GM.dailyPlanM3d || 16500) / 24;
+    const GT = (sim.stationById('lc') || {}).shortName || 'LC', GH = (sim.stationById('ph') || {}).shortName || 'PH';
     const $ = (id) => document.getElementById(id);
     let g = null;
     let best = null;
@@ -283,13 +334,13 @@
           x.fillStyle = gr; x.fillRect(0, 380, W, 260);
         }
         x.fillStyle = '#9fb3bf'; x.font = '600 34px "Barlow Condensed", sans-serif';
-        x.fillText('OLEODUCTO BETA · ' + r.label.toUpperCase(), 72, 700);
+        x.fillText((GM.custom ? String(GM.shortTitle || 'Oleoducto').toUpperCase() : 'OLEODUCTO BETA') + ' · ' + r.label.toUpperCase(), 72, 700);
         x.fillStyle = '#f1efe8'; x.font = '700 190px "Barlow Condensed", sans-serif';
         x.fillText(r.score.toLocaleString('es-AR'), 64, 880);
         x.fillStyle = '#e8b04a'; x.font = '600 64px "Barlow Condensed", sans-serif';
         x.fillText(r.rank, 72, 970);
         const rows = [
-          ['m³ entregados en LC', r.m3.toLocaleString('es-AR') + ' / ' + r.plan.toLocaleString('es-AR')],
+          ['m³ entregados en ' + GT, r.m3.toLocaleString('es-AR') + ' / ' + r.plan.toLocaleString('es-AR')],
           ['Decisiones correctas', r.correct + ' de ' + r.n],
           ['Reacción media', r.avgReact != null ? r.avgReact.toFixed(1) + ' s' : '—'],
           ['Crudo derramado', r.spill.toLocaleString('es-AR') + ' m³'],
@@ -302,7 +353,7 @@
           x.strokeStyle = '#26323a'; x.beginPath(); x.moveTo(72, y + 20); x.lineTo(W - 72, y + 20); x.stroke();
         });
         x.fillStyle = '#8b979d'; x.font = '400 28px "IBM Plex Mono", monospace';
-        x.fillText('PH → LC · 530 km · peak 1.985 m · ¿Lo hacés mejor?', 72, H - 50);
+        x.fillText(GM.custom ? `${GH} → ${GT} · ${Math.round(GM.lengthKm || 0)} km · ¿Lo hacés mejor?` : 'PH → LC · 530 km · peak 1.985 m · ¿Lo hacés mejor?', 72, H - 50);
         const url = c.toDataURL('image/png');
         $('g-card').src = url;
         $('g-dl').onclick = () => saveCard(c, url);

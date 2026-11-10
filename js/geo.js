@@ -19,7 +19,52 @@
     return { x: (lon - LON0) * KX, z: -(lat - LAT0) * KZ };
   }
 
+  // v8: ducto a medida con trazado real (lat/lon por PK)
+  function buildCustom(config) {
+    const meta = config._meta;
+    const R = meta.geoRoute; // [[pk, lat, lon], ...]
+    let la0 = 0, lo0 = 0, laMin = 90, laMax = -90, loMin = 180, loMax = -180;
+    for (const r of R) { laMin = Math.min(laMin, r[1]); laMax = Math.max(laMax, r[1]); loMin = Math.min(loMin, r[2]); loMax = Math.max(loMax, r[2]); }
+    la0 = (laMin + laMax) / 2; lo0 = (loMin + loMax) / 2;
+    const kx = 111.32 * Math.cos((la0 * Math.PI) / 180), kz = 110.57;
+    const proj = (lat, lon) => ({ x: (lon - lo0) * kx, z: -(lat - la0) * kz });
+    const unproj = (x, z) => ({ lat: la0 - z / kz, lon: lo0 + x / kx });
+    const pts = R.map((r) => Object.assign({ pk: r[0] }, proj(r[1], r[2])));
+    const L = meta.lengthKm || (pts.length ? pts[pts.length - 1].pk : 1);
+    const alt = (config.altimetryPolyline || []).slice().sort((a, b) => a.pkKm - b.pkKm);
+    function elevAt(pk) {
+      if (!alt.length) return 0;
+      if (pk <= alt[0].pkKm) return alt[0].elevMsnm;
+      for (let i = 1; i < alt.length; i++) {
+        const a = alt[i - 1], b = alt[i];
+        if (pk <= b.pkKm) { const f = (pk - a.pkKm) / Math.max(1e-6, b.pkKm - a.pkKm); return a.elevMsnm + (b.elevMsnm - a.elevMsnm) * f; }
+      }
+      return alt[alt.length - 1].elevMsnm;
+    }
+    function posAt(pk) {
+      pk = Math.max(0, Math.min(L, pk));
+      if (!pts.length) return { x: 0, z: 0 };
+      let lo = 0, hi = pts.length - 1;
+      while (hi - lo > 1) { const m = (lo + hi) >> 1; if (pts[m].pk <= pk) lo = m; else hi = m; }
+      const a = pts[lo], b = pts[hi];
+      const f = Math.max(0, Math.min(1, (pk - a.pk) / Math.max(1e-6, b.pk - a.pk)));
+      return { x: a.x + (b.x - a.x) * f, z: a.z + (b.z - a.z) * f };
+    }
+    const nodes = config.stations.slice().sort((a, b) => (a.pkKm || 0) - (b.pkKm || 0)).map((s) => {
+      const p = s.lat != null && s.lat !== 0 ? proj(s.lat, s.lon) : posAt(s.pkKm || 0);
+      return { id: s.id, pk: s.pkKm || 0, x: p.x, z: p.z };
+    });
+    const step = Math.max(0.1, L / 265);
+    const samples = [];
+    for (let pk = 0; pk <= L + 1e-6; pk += step) { const p = posAt(pk); samples.push({ pk, x: p.x, z: p.z, e: elevAt(pk) }); }
+    if (samples[samples.length - 1].pk < L - 1e-6) { const p = posAt(L); samples.push({ pk: L, x: p.x, z: p.z, e: elevAt(L) }); }
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const s of samples) { minX = Math.min(minX, s.x); maxX = Math.max(maxX, s.x); minZ = Math.min(minZ, s.z); maxZ = Math.max(maxZ, s.z); }
+    return { L, nodes, samples, elevAt, posAt, bounds: { minX, maxX, minZ, maxZ }, profStep: Math.max(0.1, L / 106), custom: true, proj, unproj, terrain: meta.terrain || null };
+  }
+
   function build(config) {
+    if (config._meta && config._meta.custom && config._meta.geoRoute && config._meta.geoRoute.length > 1) return buildCustom(config);
     const stations = config.stations.slice().sort((a, b) => (a.pkKm || 0) - (b.pkKm || 0));
     const nodes = stations.filter((s) => LL[s.id]).map((s) => {
       const p = project(LL[s.id][0], LL[s.id][1]);
@@ -77,7 +122,7 @@
       minZ = Math.min(minZ, s.z); maxZ = Math.max(maxZ, s.z);
     }
 
-    return { L, nodes, samples, elevAt, posAt, bounds: { minX, maxX, minZ, maxZ } };
+    return { L, nodes, samples, elevAt, posAt, bounds: { minX, maxX, minZ, maxZ }, profStep: 5 };
   }
 
   // Presión a lo largo del ducto: HGL lineal entre la descarga de una estación y la aspiración de la siguiente

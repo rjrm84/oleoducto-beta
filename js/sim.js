@@ -17,6 +17,10 @@
 
   function createSim(config) {
     const meta = config._meta || {};
+    // v8: ductos a medida (constructor). La cabecera se llama 'ph', la terminal 'lc' y la cabecera alternativa 'cd'.
+    const isCustom = !!meta.custom;
+    const lsKey = isCustom ? LS_KEY + '-' + (meta.pipelineId || 'custom') + '-' + (meta.specVersion || 0) : LS_KEY;
+    const peakPk = () => (meta.peakPkKm != null ? Number(meta.peakPkKm) : 198);
     const thr0 = deepClone(config.thresholds || {});
     const state = {
       config: deepClone(config),
@@ -85,7 +89,7 @@
       playbookChecks: {},
       linepack: {},
       oilFrontPkKm: 0,
-      oilReachablePkKm: 530,
+      oilReachablePkKm: meta.lengthKm || 530,
       cascadeBlock: null,
       segmentDpDra: {},
       segmentPMin: {},
@@ -182,7 +186,12 @@
      * Dose band ops 6–10 L/h. Upstream station injection feeds the next segment.
      */
     function draFrictionMul(fromId) {
-      const st = stationById(fromId);
+      let st = stationById(fromId);
+      // v8: en ductos a medida el DRA sigue aguas abajo hasta la próxima estación de bombeo (las bombas lo degradan)
+      if (isCustom && st && !(st.pumps && st.pumps.length)) {
+        const up = sortedStations().filter((x) => x.pumps && x.pumps.length && (x.pkKm || 0) < (st.pkKm || 0)).sort((a, b) => (b.pkKm || 0) - (a.pkKm || 0))[0];
+        if (up) st = up;
+      }
       if (!stationDraActive(st)) return 1;
       const lph = stationDraLph(st);
       const h = hyd();
@@ -274,13 +283,60 @@
     }
 
     /** Hard cascade reachability (ops): PH → AC(2) → CD(3 turbos) → peak → LC; PA regulates Q. */
+    function cascadeReachabilityGeneric() {
+      const L = lengthKm();
+      const sorted = sortedStations().slice().sort((a, b) => (a.pkKm || 0) - (b.pkKm || 0));
+      const result = { maxPkKm: L, reason: 'ok', qFactor: 1, phOk: false, acOk: true, cdOk: true, turbosOn: 0, paThrottle: 1 };
+      const ph = stationById('ph');
+      const phM = ph ? mainsOnline(ph) : { n: 0, on: 0 };
+      const phNeed = ph ? minMainsRequired(ph) : 1;
+      const phPumping = !!ph && !state.phFailed && !state.failedStations.ph && !state.allStationsOff && phM.on >= Math.min(phNeed, phM.n || phNeed);
+      const cdTemp = state.phFailed && state.cdTempHead && !state.allStationsOff && !!stationById('cd');
+      result.phOk = phPumping || cdTemp;
+      if (!phPumping && !cdTemp) {
+        const nxt = sorted.find((x) => x.id !== 'ph' && (x.pkKm || 0) > (ph ? ph.pkKm || 0 : 0));
+        result.maxPkKm = Math.max(1, (nxt ? nxt.pkKm || 0 : L) * 0.35);
+        result.reason = 'sin_PH';
+        result.qFactor = 0;
+        return result;
+      }
+      if (cdTemp && !phPumping) { result.reason = 'cd_cabecera_temp'; result.qFactor = 0.55; }
+      for (const eb of sorted) {
+        if (eb.id === 'ph' || !eb.pumps || !eb.pumps.length) continue;
+        if (cdTemp && eb.id !== 'cd' && (eb.pkKm || 0) < (stationById('cd').pkKm || 0)) continue;
+        const em = mainsOnline(eb);
+        const need = minMainsRequired(eb);
+        if (state.failedStations[eb.id] || em.on < Math.min(need, em.n || need)) {
+          result.maxPkKm = Math.min(result.maxPkKm, (eb.pkKm || 0) + Math.max(3, L * 0.03));
+          result.reason = 'EB_' + (eb.shortName || eb.id) + '_sin_bombas';
+          result.qFactor = Math.min(result.qFactor, 0.25);
+          return result;
+        }
+      }
+      if (state.rupture && state.rupture.active && state.rupture.pkKm != null) {
+        const rpk = Number(state.rupture.pkKm);
+        if (state.rupture.isolated) {
+          result.maxPkKm = Math.min(result.maxPkKm, rpk);
+          result.reason = 'fuga_aislada_PK' + rpk.toFixed(0);
+          result.qFactor = Math.min(result.qFactor, 0.05);
+          return result;
+        }
+        result.maxPkKm = Math.min(result.maxPkKm, rpk + 5);
+        result.reason = 'fuga_PK' + rpk.toFixed(0);
+        result.qFactor = Math.min(result.qFactor, 0.35);
+      }
+      result.maxPkKm = L;
+      return result;
+    }
+
     function cascadeReachability() {
+      if (isCustom) return cascadeReachabilityGeneric();
       const L = lengthKm();
       const ph = stationById('ph');
       const ac = stationById('ac');
       const cd = stationById('cd');
       const pa = stationById('pa');
-      const peakPk = 198;
+      const peakPkV = peakPk();
       const result = {
         maxPkKm: L,
         reason: 'ok',
@@ -347,7 +403,7 @@
       result.cdOk = cdOk;
       if (!cdOk) {
         // CD needs 3 turbos in line to push over high point toward LC
-        result.maxPkKm = Math.min(peakPk + 5, (cd ? cd.pkKm || 160 : 160) + 45);
+        result.maxPkKm = Math.min(peakPkV + 5, (cd ? cd.pkKm || 160 : 160) + 45);
         result.reason = 'CD_sin_3_turbos';
         result.qFactor = Math.min(result.qFactor, 0.2);
         return result;
@@ -761,7 +817,9 @@
       if (state.globalFlowSetpoint <= 0) return 0;
       if (state.phFailed || state.allStationsOff) return maxFlow();
       const ph = stationById('ph');
-      const ac = stationById('ac');
+      const ac = isCustom
+        ? sortedStations().slice().sort((a, b) => (a.pkKm || 0) - (b.pkKm || 0)).find((x) => x.id !== 'ph' && x.pumps && x.pumps.length && !state.failedStations[x.id])
+        : stationById('ac');
       if (!ph || !ac) return maxFlow();
       const pDisc = phDischargeKg(ph) || phMaxDisc();
       const pMinRaw = ac.pAspMinKgCm2 != null ? ac.pAspMinKgCm2 : thr().pAspMinKgCm2_default || 4;
@@ -772,7 +830,7 @@
       const dPe = elevLossAlong(ph.pkKm || 0, ac.pkKm || 65);
       const budget = pDisc - pMin - dPe; // available for friction
       if (budget <= 1) return Math.min(maxFlow(), Math.max(0, state.globalFlowSetpoint));
-      const f = frictionFFor('ph', 'ac');
+      const f = isCustom ? frictionFFor('ph', ac.id) : frictionFFor('ph', 'ac');
       const D = diameterM();
       const A = areaM2();
       const L = dL * 1000;
@@ -848,6 +906,16 @@
       return Math.min(maxFlow(), Math.max(0, q));
     }
 
+    function midPumpId() {
+      const ps = pumpingStations().filter((x) => x.id !== 'ph').sort((a, b) => (a.pkKm || 0) - (b.pkKm || 0));
+      return ps.length ? ps[Math.floor(ps.length / 2)].id : 'ph';
+    }
+    function lastPumpId() {
+      const ps = sortedStations().filter((x) => x.id !== 'lc' && x.pumps && x.pumps.length);
+      ps.sort((a, b) => (a.pkKm || 0) - (b.pkKm || 0));
+      return ps.length ? ps[ps.length - 1].id : null;
+    }
+
     function requiredDischargeKg(i, flow) {
       // Recorre la polilínea de altimetría (incluye el peak) hasta el próximo punto de control
       // y devuelve la P de descarga mínima que mantiene P ≥ P_mín en todo el tramo
@@ -887,7 +955,10 @@
         for (const st of sorted) if ((st.pkKm || 0) <= prevPk + 1e-6) a = st;
         let bb = end;
         for (let k = sorted.length - 1; k >= 0; k--) if ((sorted[k].pkKm || 0) >= pk - 1e-6) bb = sorted[k];
-        cum += frictionLossKg(Math.max(flow, 1), Math.max(0.001, pk - prevPk), frictionFFor(a.id, bb.id));
+        // v8: en ductos a medida, el caudal del sub-tramo suma las inyecciones aguas arriba
+        let qSeg = flow;
+        if (isCustom) for (const st of sorted) if ((st.pkKm || 0) > pk0 + 1e-6 && (st.pkKm || 0) <= prevPk + 1e-6) qSeg += stationInjectionTotal(st);
+        cum += frictionLossKg(Math.max(qSeg, 1), Math.max(0.001, pk - prevPk), frictionFFor(a.id, bb.id));
         cum += elevLossKg(elevAtPk(pk) - elevAtPk(prevPk));
         const minHere = pk === pk1 ? target : pLineMin;
         need = Math.max(need, cum + minHere);
@@ -994,7 +1065,7 @@
               pIn = Math.max(0, pLine * 0.1);
               pOut = pIn;
               flow = 0;
-            } else if (state.phFailed && state.cdTempHead && (prev.pkKm || 0) < (stationById('cd').pkKm || 160)) {
+            } else if (state.phFailed && state.cdTempHead && stationById('cd') && (prev.pkKm || 0) < (stationById('cd').pkKm || 160)) {
               // upstream of CD still low
               pIn = Math.max(0, 2);
               pOut = pIn;
@@ -1049,7 +1120,7 @@
               if (!state.scenarioActive && boost > 0) {
                 const need = requiredDischargeKg(i, flow);
                 if (need != null) {
-                  const floor = st.id === 'rt' ? 0 : pIn; // RT puede estrangular para entregar el SP de LC
+                  const floor = st.id === 'rt' || (isCustom && st.id === lastPumpId()) ? 0 : pIn; // RT puede estrangular para entregar el SP de LC
                   pOut = Math.min(pOut, Math.max(floor, need));
                 }
               }
@@ -1094,7 +1165,7 @@
           if (pOut > capP) pOut = capP;
         }
 
-        if (state.scenarioActive === 'sobrepresion' && (st.id === 'mg' || st.id === 'mal')) {
+        if (state.scenarioActive === 'sobrepresion' && (st.id === 'mg' || st.id === 'mal' || (isCustom && st.id === midPumpId()))) {
           pOut += 25;
         }
 
@@ -1166,7 +1237,7 @@
         }
       }
       const lc = stationById('lc');
-      if (lc && (lc.pkKm || 530) > maxPk + 0.5) qAtLc = 0;
+      if (lc && (lc.pkKm || lengthKm()) > maxPk + 0.5) qAtLc = 0;
       // line flow = flow at farthest pressurized reachable station
       let qLine = 0;
       for (const st of sorted) {
@@ -1183,7 +1254,7 @@
       }
       state.lineFlow = qLine;
       updateDuctMotionFlag();
-      if (lc) state.segmentFlows.lc = (lc.pkKm || 530) <= maxPk + 0.5 ? qLine : 0;
+      if (lc) state.segmentFlows.lc = (lc.pkKm || lengthKm()) <= maxPk + 0.5 ? qLine : 0;
 
       // Track P min / max along live stations
       let pMin = Infinity;
@@ -1427,11 +1498,12 @@
       const lc = stationById('lc');
       if (lc) {
         const pLc = state.pressuresIn.lc != null ? state.pressuresIn.lc : state.pressures.lc;
-        if (pLc != null && (pLc < 3 || pLc > 15)) {
+        const pLcHi = isCustom ? Math.max(15, (meta.opMaxKgCm2 || 80) * 0.9) : 15;
+        if (pLc != null && (pLc < 3 || pLc > pLcHi)) {
           next.push({
             id: 'lc-arrival',
             severity: pLc < 3 ? 'critical' : 'warn',
-            text: `Llegada LC ${pLc.toFixed(1)} kg/cm² (tip. entrenamiento 5–8)`,
+            text: `Llegada ${lc.shortName || 'LC'} ${pLc.toFixed(1)} kg/cm² (tip. entrenamiento 5–8)`,
           });
         }
         const qLc = state.segmentFlows.lc || state.lineFlow || 0;
@@ -1441,7 +1513,7 @@
           next.push({
             id: 'lc-receipt',
             severity: 'warn',
-            text: `Recibo LC ${qLc.toFixed(0)} fuera de banda ${tgt}±${band} m³/h`,
+            text: `Recibo ${lc.shortName || 'LC'} ${qLc.toFixed(0)} fuera de banda ${tgt}±${band} m³/h`,
           });
         }
       }
@@ -1535,7 +1607,7 @@
             next.push({
               id: 'tk-maxop-' + tk.id,
               severity: 'warn',
-              text: `Terminal LC: ${tk.name} sobre máximo operativo (${Math.round(tk.volumeM3)} m³) · sin tanque libre, reducir bombeo`,
+              text: `Terminal ${ldc.shortName || 'LC'}: ${tk.name} sobre máximo operativo (${Math.round(tk.volumeM3)} m³) · sin tanque libre, reducir bombeo`,
             });
           } else if (tk.levelPct <= 5) {
             next.push({
@@ -1574,14 +1646,83 @@
       state.alarms = next;
     }
 
+    // v8: terminal con N tanques — uno recibe, uno entrega, el resto en reposo o espera
+    function tanksGeneric(tks, inlet, outRate, dtHours, ref, tName) {
+      const cap = (t) => t.capacityM3 || 20000;
+      const mx = (t) => t.maxOpM3 || cap(t) * 0.875;
+      const mn = (t) => t.minOpM3 || cap(t) * 0.2;
+      for (const t of tks) { if (t.volumeM3 == null) t.volumeM3 = ((t.levelPct || 50) / 100) * cap(t); t.flowM3h = 0; }
+      // reposo
+      for (const t of tks) if (t.mode === 'reposo') {
+        t.settleLeftH = Math.max(0, (t.settleLeftH || 0) - dtHours);
+        if (t.settleLeftH <= 0) { t.mode = 'espera'; t.ready = true; }
+      }
+      // recepción
+      let rx = tks.find((t) => t.mode === 'recibe');
+      if (!rx) {
+        rx = tks.filter((t) => t.mode === 'espera' && t.volumeM3 < mx(t) * 0.7).sort((a, b) => a.volumeM3 - b.volumeM3)[0];
+        if (rx) { rx.mode = 'recibe'; rx.ready = false; }
+      }
+      if (rx) {
+        rx.volumeM3 += inlet * dtHours;
+        rx.flowM3h = inlet;
+        if (rx.volumeM3 >= mx(rx)) {
+          const nx = tks.filter((t) => t !== rx && t.mode === 'espera' && t.volumeM3 < mx(t) * 0.7).sort((a, b) => a.volumeM3 - b.volumeM3)[0];
+          if (nx) {
+            rx.mode = 'reposo'; rx.settleLeftH = ref.settleHours || 6; rx.ready = false;
+            nx.mode = 'recibe'; nx.ready = false;
+            logEvent(`Terminal ${tName}: ${rx.name} lleno (${Math.round(rx.volumeM3)} m³) → reposo; ${nx.name} pasa a recibir`, 'ops');
+          } else if (rx.volumeM3 >= cap(rx) * 0.97) rx.volumeM3 = cap(rx) * 0.97;
+        }
+      }
+      // entrega
+      let tx = tks.find((t) => t.mode === 'entrega');
+      if (!tx && outRate > 0) {
+        tx = tks.filter((t) => t.mode === 'espera' && t.ready && t.volumeM3 > mn(t) + 500).sort((a, b) => b.volumeM3 - a.volumeM3)[0];
+        if (tx) { tx.mode = 'entrega'; logEvent(`Terminal ${tName}: ${tx.name} drenado y liberado → entrega`, 'ops'); }
+      }
+      let delivered = 0;
+      if (tx) {
+        const dv = Math.min(outRate * dtHours, Math.max(0, tx.volumeM3 - mn(tx)));
+        tx.volumeM3 -= dv; delivered = dv;
+        tx.flowM3h = -outRate;
+        if (tx.volumeM3 <= mn(tx) + 0.5) { tx.mode = 'espera'; tx.ready = false; logEvent(`Terminal ${tName}: ${tx.name} en fondo operativo (${Math.round(tx.volumeM3)} m³)`, 'ops'); }
+      }
+      if (state.port) { state.port.deliveredM3h = dtHours > 0 ? delivered / dtHours : 0; }
+      for (const t of tks) t.levelPct = (t.volumeM3 / cap(t)) * 100;
+      return delivered;
+    }
+
     function updateTanks(dtHours) {
       // v6: terminal LC con dos tanques: uno recibe del ducto, otro entrega a refinería según programa
       const ldc = stationById('lc');
       if (!ldc || !ldc.tanks || !ldc.tanks.length) return;
       const ref = state.config.refinery || { programM3d: 16500, settleHours: 6 };
       const inlet = state.segmentFlows.lc || 0;
-      const outRate = (Number(ref.programM3d) || 0) / 24;
+      let outRate = (Number(ref.programM3d) || 0) / 24;
       const tks = ldc.tanks;
+      const tName = ldc.shortName || 'LC';
+      // v8: puerto de carga — buques con lote, caudal de carga e intervalo de arribo
+      if (ref.mode === 'puerto') {
+        const P = state.port || (state.port = { berthed: false, loadedM3: 0, nextShipH: Number(ref.firstShipH != null ? ref.firstShipH : 6), ships: 0 });
+        const shipM3 = Number(ref.shipM3) || 50000;
+        if (!P.berthed) {
+          P.nextShipH -= dtHours;
+          outRate = 0;
+          if (P.nextShipH <= 0) { P.berthed = true; P.loadedM3 = 0; P.ships++; logEvent(`Puerto ${ldc.name}: buque ${P.ships} amarrado · lote ${Math.round(shipM3)} m³`, 'ops'); }
+        }
+        if (P.berthed) outRate = Math.min(Number(ref.loadRateM3h) || 3000, Math.max(0, shipM3 - P.loadedM3) / Math.max(1e-6, dtHours));
+        P.rateM3h = outRate;
+      }
+      if (isCustom) {
+        const dv = tanksGeneric(tks, inlet, outRate, dtHours, ref, tName);
+        const P = state.port;
+        if (ref.mode === 'puerto' && P && P.berthed) {
+          P.loadedM3 += dv;
+          if (P.loadedM3 >= (Number(ref.shipM3) || 50000) - 1) { P.berthed = false; P.nextShipH = Number(ref.shipIntervalH) || 72; logEvent(`Puerto ${ldc.name}: buque ${P.ships} cargado (${Math.round(P.loadedM3)} m³) y zarpa`, 'ops'); }
+        }
+        return;
+      }
       for (const tk of tks) {
         if (tk.volumeM3 == null) tk.volumeM3 = (tk.levelPct / 100) * (tk.capacityM3 || 20000);
         const max = tk.maxOpM3 || tk.capacityM3 * 0.875, min = tk.minOpM3 || tk.capacityM3 * 0.2;
@@ -1589,11 +1730,11 @@
           tk.volumeM3 += inlet * dtHours;
           tk.flowM3h = inlet;
           if (tk.volumeM3 >= max) {
-            const other = tks.find((x) => x !== tk && x.mode !== 'recibe');
-            if (other && other.mode !== 'recibe' && other.volumeM3 <= (other.minOpM3 || 4000) + 50) {
+            const other = tks.find((x) => x !== tk && x.mode === 'espera' && x.volumeM3 < (x.maxOpM3 || x.capacityM3 * 0.875) * 0.7) || tks.find((x) => x !== tk && x.mode !== 'recibe');
+            if (other && other.mode !== 'recibe' && (other.volumeM3 <= (other.minOpM3 || 4000) + 50 || (other.mode === 'espera' && other.volumeM3 < (other.maxOpM3 || other.capacityM3 * 0.875) * 0.7))) {
               tk.mode = 'reposo'; tk.settleLeftH = ref.settleHours || 6;
               other.mode = 'recibe';
-              logEvent(`Terminal LC: ${tk.name} lleno (${Math.round(tk.volumeM3)} m³) → reposo; ${other.name} pasa a recibir`, 'ops');
+              logEvent(`Terminal ${tName}: ${tk.name} lleno (${Math.round(tk.volumeM3)} m³) → reposo; ${other.name} pasa a recibir`, 'ops');
             } else if (tk.volumeM3 >= (tk.capacityM3 || 20000) * 0.97) {
               tk.volumeM3 = (tk.capacityM3 || 20000) * 0.97;
             }
@@ -1602,7 +1743,7 @@
           tk.flowM3h = 0;
           tk.settleLeftH = Math.max(0, (tk.settleLeftH || 0) - dtHours);
           const delivering = tks.find((x) => x.mode === 'entrega');
-          if (tk.settleLeftH <= 0 && !delivering) { tk.mode = 'entrega'; logEvent(`Terminal LC: ${tk.name} drenado y liberado → entrega a refinería`, 'ops'); }
+          if (tk.settleLeftH <= 0 && !delivering) { tk.mode = 'entrega'; logEvent(`Terminal ${tName}: ${tk.name} drenado y liberado → entrega`, 'ops'); }
         } else if (tk.mode === 'entrega') {
           const dv = Math.min(outRate * dtHours, Math.max(0, tk.volumeM3 - min));
           tk.volumeM3 -= dv;
@@ -1612,7 +1753,7 @@
             const recv = tks.find((x) => x.mode === 'recibe');
             tk.mode = recv ? 'espera' : 'recibe';
             if (next) next.mode = 'entrega';
-            logEvent(`Terminal LC: ${tk.name} en fondo operativo (${Math.round(tk.volumeM3)} m³)`, 'ops');
+            logEvent(`Terminal ${tName}: ${tk.name} en fondo operativo (${Math.round(tk.volumeM3)} m³)`, 'ops');
           }
         } else if (tk.mode === 'espera') {
           tk.flowM3h = 0;
@@ -1641,7 +1782,7 @@
       if (state.pig.vMinMs && (vKmH / 3.6 < state.pig.vMinMs || vKmH / 3.6 > (ptype.vMaxMs || 9))) state.pig.vOut = (state.pig.vOut || 0) + dtHours;
       if (state.pig.willStick != null && state.pig.pkKm >= state.pig.willStick - 0.5) {
         state.pig.stuck = true; state.pig.status = 'stuck'; state.pig.pkKm = state.pig.willStick; state.pig.willStick = null;
-        logEvent(`Pig ${ptype.name} detenido en el peak PK 198 (acumulación de parafina)`, 'alarm');
+        logEvent(`Pig ${ptype.name} detenido en el punto alto PK ${Math.round(peakPk())} (acumulación de parafina)`, 'alarm');
         activatePlaybook(['pig', 'pig_stuck_peak']);
         return;
       }
@@ -1682,8 +1823,8 @@
       }
 
       // pig in segment adds slight ΔP signature already in dPForeAft
-      const mal = stationById('mg') || stationById('mal');
-      const malPk = mal ? Number(mal.pkKm) || 0 : 240;
+      const mal = isCustom ? null : stationById('mg') || stationById('mal');
+      const malPk = mal ? Number(mal.pkKm) || 0 : peakPk();
       if (
         state.scenarioActive === 'pig_stuck' &&
         state.pig.pkKm >= malPk - 8 &&
@@ -1810,7 +1951,7 @@
       const savedAll = state.allStationsOff;
       const savedFlow = state.globalFlowSetpoint;
       const ranking = [];
-      const ebs = ['ph', 'ac', 'cd', 'mg', 'sos', 'rt', 'ug'];
+      const ebs = isCustom ? pumpingStations().map((x) => x.id) : ['ph', 'ac', 'cd', 'mg', 'sos', 'rt', 'ug'];
       // baseline
       state.allStationsOff = false;
       state.phFailed = false;
@@ -1835,7 +1976,7 @@
         for (const p of st.pumps) p.online = false;
         if (id === 'ph') {
           state.phFailed = true;
-          state.cdTempHead = true;
+          state.cdTempHead = !!stationById('cd');
           state.cdAutonomyRemainH = state.cdAutonomyTotalH;
         }
         computeHydraulics();
@@ -1964,7 +2105,7 @@
           state.failedStations.ph = true;
           const ph = stationById('ph');
           if (ph && ph.pumps) for (const p of ph.pumps) p.online = false;
-          state.cdTempHead = true;
+          state.cdTempHead = !!stationById('cd');
           state.cdAutonomyRemainH = state.cdAutonomyTotalH;
         } else {
           // force PH fail + CD head as strategy demo
@@ -2053,7 +2194,7 @@
       const sorted = sortedStations().slice().sort((a, b) => (a.pkKm || 0) - (b.pkKm || 0));
       const out = [];
       let t = 0, pk = state.pig.pkKm;
-      const destPk = (stationById(state.pig.toId) || {}).pkKm || 530;
+      const destPk = (stationById(state.pig.toId) || {}).pkKm || lengthKm();
       for (const st of sorted) {
         if ((st.pkKm || 0) <= pk + 0.01) continue;
         if (!state.pig.auto && (st.pkKm || 0) > destPk + 0.01) break;
@@ -2430,7 +2571,7 @@
       state.pig.auto = opts.auto != null ? !!opts.auto : !!state.pig.auto;
       state.pig.vMinMs = type.vMinMs || null;
       state.pig.vOut = 0;
-      state.pig.willStick = Math.random() < (type.stuckRisk || 0) * 0.3 && (from.pkKm || 0) < 198 && (to.pkKm || 0) > 198 ? 198 : null;
+      state.pig.willStick = Math.random() < (type.stuckRisk || 0) * 0.3 && (from.pkKm || 0) < peakPk() && (to.pkKm || 0) > peakPk() ? peakPk() : null;
       from.pigTrap.status = 'launched';
       to.pigTrap.status = 'awaiting';
       logEvent(`Pig ${type.name} lanzado desde ${from.shortName} hacia ${to.shortName}`, 'pig');
@@ -2480,10 +2621,13 @@
       if (st.pumps) for (const p of st.pumps) p.online = false;
       if (id === 'ph') {
         state.phFailed = true;
-        state.cdTempHead = true;
+        state.cdTempHead = !!stationById('cd') && !state.failedStations.cd;
         state.cdAutonomyRemainH = state.cdAutonomyTotalH;
+        const cdS = stationById('cd');
         logEvent(
-          `Falla PH / para bombeo — CD cabecera temporal hasta ${state.cdAutonomyTotalH} h (linepack/tanque)`,
+          state.cdTempHead
+            ? `Falla ${st.shortName || 'PH'} / para bombeo — ${(cdS && cdS.shortName) || 'CD'} cabecera temporal hasta ${state.cdAutonomyTotalH} h (linepack/tanque)`
+            : `Falla de la cabecera ${st.shortName || 'PH'}: se detiene el bombeo de la línea`,
           'scenario'
         );
         ensureEstrategiaGlobal(['falla_ph']);
@@ -2625,7 +2769,7 @@
         logEvent('Escenario: Pig run', 'scenario');
       } else if (name === 'pig_stuck' || name === 'pig_stuck_peak') {
         if (!state.pig.active) launchPig();
-        state.pig.pkKm = 198;
+        state.pig.pkKm = Math.min(peakPk(), lengthKm() - 1);
         state.pig.stuck = true;
         state.pig.status = 'stuck';
         state.pig.speedKmPerHour = 0;
@@ -2634,7 +2778,7 @@
         state.globalFlowSetpoint = Math.max(120, state.globalFlowSetpoint * 0.55);
         activatePlaybook(['pig', 'pig_stuck_peak'], { merge: true });
         ensureEstrategiaGlobal(['pig_stuck_peak']);
-        logEvent('Pig STUCK ~PK198 (peak) — v≈0 · ΔP detrás↑ · Q↓ · empuje controlado / vigilar MAOP', 'scenario');
+        logEvent('Pig STUCK ~PK' + Math.round(peakPk()) + ' (punto alto) — v≈0 · ΔP detrás↑ · Q↓ · empuje controlado / vigilar MAOP', 'scenario');
       } else if (name === 'fuga_rotura_pk' || name === 'fuga_rotura') {
         const pk = state._pendingRupturePk != null ? state._pendingRupturePk : 120;
         startRuptureAtPk(pk, 0.75);
@@ -2660,7 +2804,7 @@
         state._pendingElectricEb = null;
       } else if (name === 'falla_ph_cd_cabecera' || name === 'cd_inj_limit') {
         state.phFailed = true;
-        state.cdTempHead = true;
+        state.cdTempHead = !!stationById('cd');
         state.cdAutonomyRemainH = state.cdAutonomyTotalH;
         state.failedStations.ph = true;
         const ph = stationById('ph');
@@ -2802,7 +2946,7 @@
               : null,
           })),
         };
-        localStorage.setItem(LS_KEY, JSON.stringify(payload));
+        localStorage.setItem(lsKey, JSON.stringify(payload));
         logEvent('Override guardado (v8)', 'edit');
         return true;
       } catch (e) {
@@ -2869,7 +3013,7 @@
 
     function loadStationsOverride() {
       try {
-        const raw = localStorage.getItem(LS_KEY);
+        const raw = localStorage.getItem(lsKey);
         if (!raw) return false;
         return applyStationsOverride(JSON.parse(raw));
       } catch (e) {
@@ -2879,7 +3023,7 @@
 
     function resetStationsToJson(baseConfig) {
       try {
-        localStorage.removeItem(LS_KEY);
+        localStorage.removeItem(lsKey);
       } catch (e) {
         /* ignore */
       }

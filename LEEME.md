@@ -1,6 +1,13 @@
-# Oleoducto Beta · simulador v7
+# Oleoducto Beta · simulador 3D + constructor de ductos
 
-Sitio estático (sin build). Three.js 0.160 desde cdn.jsdelivr.net.
-- Caudal máx. de cabecera PH 750 m³/h (LC recibe además inyecciones, ~830 m³/h).
-- Ducto 16 in: máximo 90 kg/cm²; PID de descarga por estación con SP en rampa; DRA por estación.
-- Pig: corridas entre trampas (PH → AC → CD → ML → ES → RT → LC), 5 tipos.
+Sitio estático (sin build). Se publica tal cual en Vercel, Cloudflare Pages o cualquier hosting.
+
+- `index.html` — simulador Oleoducto Beta (vista 3D, sala de control, desafío, SCADA).
+- `constructor.html` — constructor de ductos a medida: trazado sobre mapa, altimetría real
+  (Copernicus GLO-90 vía Open-Meteo), caño (NPS, schedule, grado API 5L, clase ANSI, MAOP),
+  estaciones, bombas, boosters, medición, trampas de pig, válvulas, destino (refinería, parque de
+  tanques o puerto) y revisión con el motor hidráulico.
+- `index.html?ducto=ID` — simula un ducto guardado en el navegador.
+
+Los ductos se guardan en el navegador (localStorage) y se exportan/importan como `.json`.
+Simulación de entrenamiento con valores estimados: no reemplaza un estudio hidráulico.

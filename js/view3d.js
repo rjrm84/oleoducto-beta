@@ -41,9 +41,28 @@ function start(app) {
   // ---------- muestreo del corredor ----------
   const S = geo.samples; // {pk,x,z,e} cada 2 km
   const b = geo.bounds;
+  // v8: ducto a medida → terreno real (grilla de cotas) y escala según el tamaño del trazado
+  const CUST = !!geo.custom;
+  const span = Math.max(b.maxX - b.minX, b.maxZ - b.minZ, 1);
+  const K = CUST ? Math.max(0.04, Math.min(1.6, span / 420)) : 1;
+  const mg = CUST ? span * 0.35 + 2 : 0;
+  const PMAXC = CUST ? (app.config._meta.maopKgCm2 || 95) : 95;
+  const QMAXC = CUST ? Math.max(50, (app.config._meta.defaultLcReceiptTargetM3h || 730) * 1.1) : 730;
+  if (CUST) { controls.minDistance = Math.max(0.3, 4 * K); controls.maxDistance = Math.max(60, span * 3); }
+  if (CUST) {
+    // exageración vertical para que el relieve se lea igual que en Beta (~6 % del ancho del trazado)
+    let a0 = Infinity, a1 = -Infinity;
+    for (const s0 of S) { a0 = Math.min(a0, s0.e); a1 = Math.max(a1, s0.e); }
+    let rel = a1 - a0;
+    const tg0 = geo.terrain;
+    if (tg0 && tg0.elev && tg0.elev.length) { let g0 = Infinity, g1 = -Infinity; for (const v of tg0.elev) { if (v < g0) g0 = v; if (v > g1) g1 = v; } rel = Math.max(rel, (g1 - g0) * 0.6); }
+    EXAG = Math.round(Math.max(2, Math.min(30, (0.05 * span) / Math.max(0.03, rel / 1000))));
+    const ex = $('v3d-exag');
+    if (ex) { ex.max = String(Math.max(Number(ex.max) || 20, 40)); ex.value = String(EXAG); const ev = $('v3d-exag-v'); if (ev) ev.textContent = EXAG; }
+  }
   // terreno: 150 km de cordillera al oeste, llanura amplia al este (donde mira la cámara)
-  const tMinX = b.minX - 150, tMaxX = b.maxX + 340;
-  const tMinZ = b.minZ - 230, tMaxZ = b.maxZ + 230;
+  const tMinX = CUST ? b.minX - mg : b.minX - 150, tMaxX = CUST ? b.maxX + mg : b.maxX + 340;
+  const tMinZ = CUST ? b.minZ - mg : b.minZ - 230, tMaxZ = CUST ? b.maxZ + mg : b.maxZ + 230;
   const W = tMaxX - tMinX, D = tMaxZ - tMinZ;
   const cx = (tMinX + tMaxX) / 2, cz = (tMinZ + tMaxZ) / 2;
   const vx = (b.minX + b.maxX) / 2, vz = (b.minZ + b.maxZ) / 2; // centro del corredor
@@ -83,7 +102,29 @@ function start(app) {
   }
 
   // cota del terreno en metros: valle del ducto, cordillera al oeste, llanura al este
+  // grilla real de cotas (constructor): bilineal en lat/lon
+  const TG = CUST && geo.terrain && geo.terrain.elev && geo.terrain.nx > 1 ? geo.terrain : null;
+  let eMinP = Infinity, eMaxP = -Infinity;
+  for (const s0 of S) { eMinP = Math.min(eMinP, s0.e); eMaxP = Math.max(eMaxP, s0.e); }
+  if (TG) for (const v of TG.elev) { if (v != null && isFinite(v)) { eMinP = Math.min(eMinP, v); eMaxP = Math.max(eMaxP, v); } }
+  function gridM(x, z) {
+    const ll = geo.unproj(x, z);
+    const fi = Math.max(0, Math.min(TG.nx - 1.0001, ((ll.lon - TG.lonMin) / (TG.lonMax - TG.lonMin)) * (TG.nx - 1)));
+    const fj = Math.max(0, Math.min(TG.ny - 1.0001, ((ll.lat - TG.latMin) / (TG.latMax - TG.latMin)) * (TG.ny - 1)));
+    const i = Math.floor(fi), j = Math.floor(fj), u = fi - i, v = fj - j;
+    const g = (ii, jj) => { const e = TG.elev[jj * TG.nx + ii]; return e == null || !isFinite(e) ? 0 : e; };
+    return g(i, j) * (1 - u) * (1 - v) + g(i + 1, j) * u * (1 - v) + g(i, j + 1) * (1 - u) * v + g(i + 1, j + 1) * u * v;
+  }
+  function terrainCustom(x, z) {
+    const n = nearest(x, z);
+    const relief = Math.max(30, eMaxP - eMinP);
+    const far = TG ? gridM(x, z) : n.s.e + (fbm(x * 0.6 / K, z * 0.6 / K) - 0.5) * relief * 0.35 + (ridged(x * 0.25 / K, z * 0.25 / K) - 0.3) * relief * 0.25;
+    const w = smooth(0.6 * K, 6 * K, n.d);
+    const near = n.s.e - 2;
+    return near * (1 - w) + far * w;
+  }
   function terrainM(x, z) {
+    if (CUST) return terrainCustom(x, z);
     const n = nearest(x, z);
     const valley = n.s.e;
     const dx = x - n.s.x;
@@ -111,10 +152,13 @@ function start(app) {
     for (let i = 0; i < tPos.count; i++) {
       const x = tPos.getX(i) + cx, z = tPos.getZ(i) + cz;
       tPos.setX(i, x); tPos.setZ(i, z);
-      const m = terrainM(x, z);
-      tElev[i] = m;
+      const m0 = terrainM(x, z);
+      tElev[i] = m0;
       const jitter = (hash(x * 3.1, z * 2.7) - 0.5) * 0.08;
-      if (m < 900) tmp.copy(cSand).lerp(cScrub, smooth(500, 900, m));
+      // en ductos a medida el color sigue la cota relativa del lugar (y el mar en azul)
+      const m = CUST && eMaxP < 2600 ? 450 + ((m0 - eMinP) / Math.max(150, eMaxP - eMinP)) * 2000 : m0;
+      if (CUST && m0 <= 0.5 && TG) tmp.set('#2f5f7a');
+      else if (m < 900) tmp.copy(cSand).lerp(cScrub, smooth(500, 900, m));
       else if (m < 1700) tmp.copy(cScrub).lerp(cOlive, smooth(900, 1700, m));
       else if (m < 2700) tmp.copy(cOlive).lerp(cRock, smooth(1700, 2500, m));
       else if (m < 3600) tmp.copy(cRock).lerp(cDark, smooth(2700, 3500, m));
@@ -136,7 +180,7 @@ function start(app) {
   const TUBE_SEG = 1060;
   let tube, tubeColors, tubeMat, stripeTex;
   function pipeCurve() {
-    return new THREE.CatmullRomCurve3(S.map((s) => new THREE.Vector3(s.x, H(s.e) + 0.28, s.z)));
+    return new THREE.CatmullRomCurve3(S.map((s) => new THREE.Vector3(s.x, H(s.e) + 0.28 * K, s.z)));
   }
   function makeStripes() {
     const c = document.createElement('canvas'); c.width = 64; c.height = 8;
@@ -145,13 +189,13 @@ function start(app) {
     g.fillStyle = '#9a9a9a'; g.fillRect(0, 0, 14, 8);
     const t = new THREE.CanvasTexture(c);
     t.wrapS = THREE.RepeatWrapping; t.wrapT = THREE.RepeatWrapping;
-    t.repeat.set(geo.L / 3, 1);
+    t.repeat.set(geo.L / (3 * K), 1);
     t.colorSpace = THREE.SRGBColorSpace;
     return t;
   }
   function buildTube() {
     if (tube) { scene.remove(tube); tube.geometry.dispose(); }
-    const g = new THREE.TubeGeometry(pipeCurve(), TUBE_SEG, 0.42, 8, false);
+    const g = new THREE.TubeGeometry(pipeCurve(), TUBE_SEG, 0.42 * K, 8, false);
     tubeColors = new Float32Array(g.attributes.position.count * 3).fill(1);
     g.setAttribute('color', new THREE.BufferAttribute(tubeColors, 3));
     if (!tubeMat) {
@@ -184,9 +228,9 @@ function start(app) {
       const p = prof[k];
       let c;
       if (pk > front + 0.5 || (p.q || 0) < 1 && p.p < 0.5) c = dead;
-      else if (colorMode === 'presion') c = ramp(p.p / 95);
+      else if (colorMode === 'presion') c = ramp(p.p / PMAXC);
       else if (colorMode === 'maop') c = ramp(p.p / p.maop);
-      else c = ramp((p.q || 0) / 730);
+      else c = ramp((p.q || 0) / QMAXC);
       for (let j = 0; j < ring; j++) {
         const o = (i * ring + j) * 3;
         tubeColors[o] = c.r; tubeColors[o + 1] = c.g; tubeColors[o + 2] = c.b;
@@ -195,12 +239,12 @@ function start(app) {
     tube.geometry.attributes.color.needsUpdate = true;
   }
   function legend() {
-    const lab = { presion: ['0', '95 kg/cm²'], maop: ['0 %', '100 % MAOP'], caudal: ['0', '730 m³/h'] }[colorMode];
+    const lab = { presion: ['0', Math.round(PMAXC) + ' kg/cm²'], maop: ['0 %', '100 % MAOP'], caudal: ['0', Math.round(QMAXC) + ' m³/h'] }[colorMode];
     $('v3d-legend').innerHTML = `<span>${lab[0]}</span><i style="background:linear-gradient(90deg,${RAMP.join(',')})"></i><span>${lab[1]}</span>`;
   }
 
   // ---------- HGL (cortina) ----------
-  const HSTEP = 5;
+  const HSTEP = geo.profStep || 5;
   const hglN = Math.floor(geo.L / HSTEP) + 1;
   const hglGeo = new THREE.BufferGeometry();
   const hglPos = new Float32Array(hglN * 2 * 3);
@@ -223,7 +267,7 @@ function start(app) {
       const pk = Math.min(geo.L, i * HSTEP);
       const p = prof[Math.min(prof.length - 1, i)];
       const pos = geo.posAt(pk);
-      const y0 = H(geo.elevAt(pk)) + 0.3;
+      const y0 = H(geo.elevAt(pk)) + 0.3 * K;
       const y1 = Math.max(y0, H(p.hgl));
       hglPos.set([pos.x, y0, pos.z, pos.x, y1, pos.z], i * 6);
       hglLinePos.set([pos.x, y1, pos.z], i * 3);
@@ -277,10 +321,11 @@ function start(app) {
       const grp = new THREE.Group();
       const y = H(geo.elevAt(n.pk));
       grp.position.set(n.x, y, n.z);
+      grp.scale.setScalar(K);
       const pad = new THREE.Mesh(new THREE.BoxGeometry(5, 0.25, 3.4), matPad);
       pad.position.y = 0.12; pad.userData.st = n.id;
       grp.add(pad); pickables.push(pad);
-      const tanks = n.id === 'lc' ? 4 : n.id === 'ph' || n.id === 'cd' ? 2 : st.pumps && st.pumps.length ? 1 : 0;
+      const tanks = CUST ? (n.id === 'lc' ? Math.min(6, (st.tanks || []).length || 2) : st.tankBuffer ? 2 : st.pumps && st.pumps.length ? 1 : 0) : n.id === 'lc' ? 4 : n.id === 'ph' || n.id === 'cd' ? 2 : st.pumps && st.pumps.length ? 1 : 0;
       for (let k = 0; k < tanks; k++) {
         const t = new THREE.Mesh(new THREE.CylinderGeometry(0.75, 0.75, 1.1, 20), matTank);
         t.position.set(-1.6 + (k % 2) * 1.7, 0.8, -0.9 + Math.floor(k / 2) * 1.7 + (tanks === 1 ? 0.9 : 0));
@@ -303,6 +348,7 @@ function start(app) {
       grp.add(beacon); pickables.push(beacon);
       const L = makeLabel();
       L.sp.position.y = 7.6;
+      L.sp.scale.set(0.15 / K, 0.066 / K, 1); // la etiqueta no hereda la escala del grupo
       grp.add(L.sp);
       scene.add(grp);
       stations.push({ id: n.id, st, n, group: grp, pumps, beaconMat, label: L, pad });
@@ -319,15 +365,15 @@ function start(app) {
     valveGroup.clear();
     for (const v of sim.state.valves) {
       const p = geo.posAt(v.pkKm || 0);
-      const m = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 1.4, 10), matVOpen);
-      m.position.set(p.x, H(geo.elevAt(v.pkKm || 0)) + 0.7, p.z);
+      const m = new THREE.Mesh(new THREE.CylinderGeometry(0.22 * K, 0.22 * K, 1.4 * K, 10), matVOpen);
+      m.position.set(p.x, H(geo.elevAt(v.pkKm || 0)) + 0.7 * K, p.z);
       valveGroup.add(m);
       valveMeshes[v.id] = m;
     }
   }
 
   // pig
-  const pig = new THREE.Mesh(new THREE.SphereGeometry(0.75, 20, 16), new THREE.MeshBasicMaterial({ color: '#ffb347' }));
+  const pig = new THREE.Mesh(new THREE.SphereGeometry(0.75 * K, 20, 16), new THREE.MeshBasicMaterial({ color: '#ffb347' }));
   scene.add(pig);
   let pigLabel = null; // se crea después de makeLabel
   // trazador de recorrido (para la cámara "seguir")
@@ -354,7 +400,7 @@ function start(app) {
     const p = geo.posAt(r.pkKm || 0);
     const y = H(geo.elevAt(r.pkKm || 0)) + 0.3;
     const rate = r.isolated ? 0.15 : 1;
-    poolR = Math.min(9, poolR + dt * 0.25 * rate);
+    poolR = Math.min(9 * K, poolR + dt * 0.25 * rate * K);
     pool.position.set(p.x, y - 0.2, p.z);
     pool.scale.setScalar(Math.max(0.5, poolR));
     for (let i = 0; i < PN; i++) {
@@ -443,8 +489,8 @@ function start(app) {
   }
   function corridorView(instant) {
     // desde el este (llanura) mirando a la cordillera, con todo el corredor en cuadro
-    const mid = new THREE.Vector3(vx - 10, H(1300), vz - 10);
-    const pos = new THREE.Vector3(vx + 270, 210, vz + 150);
+    const mid = CUST ? new THREE.Vector3(vx, H((eMinP + eMaxP) / 2), vz) : new THREE.Vector3(vx - 10, H(1300), vz - 10);
+    const pos = CUST ? new THREE.Vector3(vx + span * 0.5, H(eMaxP) + span * 0.5, vz + span * 0.55) : new THREE.Vector3(vx + 270, 210, vz + 150);
     if (instant) { camera.position.copy(pos); controls.target.copy(mid); }
     else flyTo(pos, mid, 1.6);
   }
@@ -452,7 +498,7 @@ function start(app) {
     const s = stations.find((x) => x.id === id);
     if (!s) return;
     const p = s.group.position;
-    flyTo(new THREE.Vector3(p.x + 14, p.y + 10, p.z + 16), new THREE.Vector3(p.x, p.y + 1, p.z), 1.6);
+    flyTo(new THREE.Vector3(p.x + 14 * K, p.y + 10 * K, p.z + 16 * K), new THREE.Vector3(p.x, p.y + 1 * K, p.z), 1.6);
   }
   function setCam(mode) {
     camMode = mode;
@@ -461,7 +507,7 @@ function start(app) {
     $('v3d-cine-bar').hidden = mode !== 'cine';
     controls.enabled = mode !== 'cine';
     if (mode === 'corredor') corridorView(false);
-    if (mode === 'estacion') stationView(selectedId || 'cd');
+    if (mode === 'estacion') stationView(selectedId || (stations.some((x) => x.id === 'cd') ? 'cd' : stations.length > 1 ? stations[1].id : 'ph'));
     if (mode === 'seguir') { tracerPk = sim.state.pig && sim.state.pig.active ? sim.state.pig.pkKm : 0; }
     if (mode === 'cine') cineT = 0;
   }
@@ -471,17 +517,18 @@ function start(app) {
     cineT = (cineT + dt) % cineDur;
     const f = cineT / cineDur;
     const pk = f * geo.L;
-    const p = geo.posAt(pk), p2 = geo.posAt(Math.min(geo.L, pk + 14));
+    const ah = 14 * K;
+    const p = geo.posAt(pk), p2 = geo.posAt(Math.min(geo.L, pk + ah));
     const y = H(geo.elevAt(pk));
-    const side = Math.sin(f * Math.PI * 6) * 10;
+    const side = Math.sin(f * Math.PI * 6) * 10 * K;
     const dir = new THREE.Vector2(p2.x - p.x, p2.z - p.z).normalize();
-    const pos = new THREE.Vector3(p.x - dir.x * 16 + -dir.y * (14 + side), y + 9 + Math.sin(f * 20) * 2, p.z - dir.y * 16 + dir.x * (14 + side));
+    const pos = new THREE.Vector3(p.x - dir.x * 16 * K + -dir.y * (14 * K + side), y + (9 + Math.sin(f * 20) * 2) * K, p.z - dir.y * 16 * K + dir.x * (14 * K + side));
     camera.position.lerp(pos, Math.min(1, dt * 1.6));
-    controls.target.lerp(new THREE.Vector3(p2.x, H(geo.elevAt(Math.min(geo.L, pk + 14))), p2.z), Math.min(1, dt * 2));
+    controls.target.lerp(new THREE.Vector3(p2.x, H(geo.elevAt(Math.min(geo.L, pk + ah))), p2.z), Math.min(1, dt * 2));
     let near = null;
-    for (const n of geo.nodes) if (Math.abs(n.pk - pk) < 18) near = n;
+    for (const n of geo.nodes) if (Math.abs(n.pk - pk) < 18 * K) near = n;
     const elev = Math.round(geo.elevAt(pk));
-    $('v3d-cine-txt').textContent = `PK ${Math.round(pk)} · cota ${elev.toLocaleString('es-AR')} m` + (near ? ` · ${(sim.stationById(near.id) || {}).name || ''}` : '') + (pk > 185 && pk < 212 ? ' · peak de la línea' : '');
+    $('v3d-cine-txt').textContent = `PK ${Math.round(pk)} · cota ${elev.toLocaleString('es-AR')} m` + (near ? ` · ${(sim.stationById(near.id) || {}).name || ''}` : '') + (CUST ? (Math.abs(pk - (app.config._meta.peakPkKm || -99)) < 10 * K ? ' · punto alto de la línea' : '') : pk > 185 && pk < 212 ? ' · peak de la línea' : '');
   }
   function followUpdate(dt) {
     const S = sim.state;
@@ -489,19 +536,19 @@ function start(app) {
     if (S.pig && S.pig.active) pk = S.pig.pkKm;
     else {
       const q = S.segmentFlows.lc || S.lineFlow || 0;
-      tracerPk = (tracerPk + dt * (4 + q / 650 * 6)) % geo.L;
+      tracerPk = (tracerPk + dt * (4 + q / 650 * 6) * K) % geo.L;
       pk = tracerPk;
     }
-    const p = geo.posAt(pk), p2 = geo.posAt(Math.min(geo.L, pk + 3));
+    const p = geo.posAt(pk), p2 = geo.posAt(Math.min(geo.L, pk + 3 * K));
     const y = H(geo.elevAt(pk));
     const dir = new THREE.Vector2(p2.x - p.x, p2.z - p.z).normalize();
     const tgt = new THREE.Vector3(p.x, y, p.z);
-    const want = new THREE.Vector3(p.x - dir.x * 9 - dir.y * 6, y + 6, p.z - dir.y * 9 + dir.x * 6);
+    const want = new THREE.Vector3(p.x - dir.x * 9 * K - dir.y * 6 * K, y + 6 * K, p.z - dir.y * 9 * K + dir.x * 6 * K);
     controls.target.lerp(tgt, Math.min(1, dt * 3));
     camera.position.lerp(want, Math.min(1, dt * 1.5));
     tracer.position.set(p.x, y + 0.3, p.z);
   }
-  const tracer = new THREE.Mesh(new THREE.TorusGeometry(0.6, 0.12, 8, 24), new THREE.MeshBasicMaterial({ color: '#ffffff' }));
+  const tracer = new THREE.Mesh(new THREE.TorusGeometry(0.6 * K, 0.12 * K, 8, 24), new THREE.MeshBasicMaterial({ color: '#ffffff' }));
   scene.add(tracer);
 
   // ---------- selección ----------
@@ -604,11 +651,11 @@ function start(app) {
       if (S.pig && S.pig.active) {
         const p = geo.posAt(S.pig.pkKm || 0);
         pig.visible = true;
-        pig.position.set(p.x, H(geo.elevAt(S.pig.pkKm || 0)) + 0.35, p.z);
+        pig.position.set(p.x, H(geo.elevAt(S.pig.pkKm || 0)) + 0.35 * K, p.z);
         const s = 1 + Math.sin(performance.now() / 180) * 0.15;
         pig.scale.setScalar(s);
         pig.material.color.set(S.pig.stuck ? '#ff5a52' : '#ffb347');
-        if (pigLabel) pigLabel.sp.position.set(pig.position.x, pig.position.y + 5, pig.position.z);
+        if (pigLabel) pigLabel.sp.position.set(pig.position.x, pig.position.y + 5 * K, pig.position.z);
       } else pig.visible = false;
       tracer.visible = camMode === 'seguir' && !(S.pig && S.pig.active);
       updateRupture(dt);

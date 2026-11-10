@@ -10,7 +10,7 @@
   const KG_M = 1e5 / (860 * 9.81);
 
   // UAM (unidades automáticas de medición): 5 propias y 3 de terceros
-  const UAM = [
+  const UAM_B = [
     { k: 'PH', st: 'ph', name: 'LACT Puesto Hernández', owner: 'Propia', dir: 'in', lab: 'PH' },
     { k: 'CD', st: 'cd', name: 'LACT Cerro Divisadero (yacimiento)', owner: 'Propia', dir: 'in', lab: 'CD', inj: true },
     { k: 'ES', st: 'sos', name: 'LACT El Sosneado', owner: 'Propia', dir: 'mid', lab: 'ES' },
@@ -20,12 +20,36 @@
     { k: 'PCR', st: 'mg', name: 'PCR / Hattrick · inyección en ML', owner: 'Tercero', dir: 'in', lab: 'ML', inj: true },
     { k: 'EME', st: 'sos', name: 'EMESA / PCR · inyección en ES', owner: 'Tercero', dir: 'in', lab: 'ES', inj: true },
   ];
-  const LABS = ['PH', 'CD', 'ML', 'ES', 'LC'];
+  const LABS_B = ['PH', 'CD', 'ML', 'ES', 'LC'];
 
   function createIngExt(app, ctx) {
     const sim = app.sim;
     const S = () => sim.state;
     const st = (id) => sim.stationById(id);
+    // v8: unidades de medición, laboratorios y textos desde la configuración
+    const META = S().config._meta || {};
+    const CUST = !!META.custom;
+    const SORTED = sim.sortedStations().slice().sort((a, b) => (a.pkKm || 0) - (b.pkKm || 0));
+    const HN = (st('ph') || {}).shortName || 'PH', TN = (st('lc') || {}).shortName || 'LC';
+    const DEST = META.destName || 'refinería';
+    const DKIND = (S().config.refinery && S().config.refinery.mode) || 'refineria';
+    const RHO = (S().config.hydraulics && S().config.hydraulics.fluidDensity_kg_m3) || 860;
+    const UAM = CUST ? [] : UAM_B;
+    if (CUST) {
+      for (const x of SORTED) {
+        const m = x.meters || {};
+        const sn = x.shortName;
+        if (m.lact || x.id === 'ph' || x.id === 'lc') {
+          if (x.id === 'ph') UAM.push({ k: sn, st: x.id, name: `LACT ${x.name}`, owner: 'Propia', dir: 'in', lab: sn });
+          else if (x.id === 'lc') UAM.push({ k: sn, st: x.id, name: `LACT ${x.name} (recibo)`, owner: 'Propia', dir: 'out', lab: sn });
+          else if (x.type !== 'injection') UAM.push({ k: sn, st: x.id, name: `LACT ${x.name}`, owner: 'Propia', dir: 'mid', lab: sn });
+        }
+        for (const inj of x.injections || []) UAM.push({ k: (sn + '-I').slice(0, 8), st: x.id, name: `${inj.name} · inyección en ${sn}`, owner: inj.owner || 'Tercero', dir: 'in', lab: sn, inj: true, injOnly: true });
+      }
+      const seen = new Set();
+      for (const u of UAM) { let k = u.k, n = 2; while (seen.has(k)) k = u.k + n++; u.k = k; seen.add(k); }
+    }
+    const LABS = CUST ? [...new Set(UAM.map((u) => u.lab))] : LABS_B;
 
     // ---------- muestreo para integridad / linepack ----------
     const series = []; // {t, qin, qout, lp}
@@ -36,6 +60,7 @@
     }
     function qIn() {
       let q = S().segmentFlows.ph || 0;
+      if (CUST) { for (const x of SORTED) if (x.id !== 'ph') q += sim.stationInjectionTotal(x); return q; }
       for (const id of ['ac', 'cd', 'mg', 'sos', 'ug']) q += sim.stationInjectionTotal(st(id));
       return q;
     }
@@ -55,9 +80,9 @@
       if (u.inj) return sim.stationInjectionTotal(st(u.st));
       return s.segmentFlows[u.st] || 0;
     }
-    function uamMeter(u) { return u.inj || ['ACO', 'PCR', 'EME'].includes(u.k) ? null : ctx.meters[u.st] && ctx.meters[u.st][0]; }
+    function uamMeter(u) { return u.inj || (!CUST && ['ACO', 'PCR', 'EME'].includes(u.k)) ? null : ctx.meters[u.st] && ctx.meters[u.st][0]; }
     function labSample(lab) {
-      const base = { PH: 858, CD: 862, ML: 870, ES: 866, LC: 862 }[lab] || 862;
+      const base = CUST ? RHO + ((LABS.indexOf(lab) * 7) % 11) - 4 : { PH: 858, CD: 862, ML: 870, ES: 866, LC: 862 }[lab] || 862;
       const dens = base + gauss() * 1.2;
       return { dens, api: 141.5 / (dens / 999.0) - 131.5, bsw: Math.max(0.05, 0.30 + gauss() * 0.02 + (lab === 'ML' ? 0.05 : 0)), sal: Math.max(5, 28 + gauss() * 6) };
     }
@@ -91,6 +116,26 @@
     (function seed() {
       const base = new Date(S().simDate.getTime());
       for (let d = 30; d >= 1; d--) {
+        if (CUST) {
+          const q0 = (META.defaultPhCabeceraM3h || 600) * (0.96 + gauss() * 0.02);
+          let up = q0;
+          const qs = {};
+          for (const x of SORTED) {
+            for (const u of UAM.filter((z) => z.st === x.id)) {
+              if (u.injOnly) { const r = (x.injections || []).reduce((a, i) => a + (i.rateM3h || 0), 0) * (1 + gauss() * 0.002); qs[u.k] = r; }
+              else qs[u.k] = x.id === 'ph' ? q0 : up;
+            }
+            up += (x.injections || []).reduce((a, i) => a + (i.rateM3h || 0), 0);
+            for (const u of UAM.filter((z) => z.st === x.id && !z.injOnly && x.id === 'lc')) qs[u.k] = up;
+          }
+          UAM.forEach((u) => {
+            const bias = (u.dir === 'out' ? 0.0003 : u.st === 'ph' ? -0.0001 : 0) + gauss() * 0.0003;
+            acc[u.k] = { gov: Math.max(0, qs[u.k] || 0) * 24 * (1 + bias), tSum: 30 + gauss(), pSum: 8, n: 1 };
+          });
+          accLp0 = linepackTotal() + gauss() * 40;
+          closeDay(new Date(base.getTime() - d * 86400000).toLocaleDateString('es-AR'), true);
+          continue;
+        }
         const qph = 600 + gauss() * 25;
         const aco = 10 + Math.abs(gauss() * 4), pcr = 21 + gauss() * 3, eme = 12 + gauss() * 3;
         const qs = { PH: qph, CD: 50, ES: qph + 50 + aco + pcr, UG: 18, LC: qph + 50 + 18 + aco + pcr + eme, ACO: aco, PCR: pcr, EME: eme };
@@ -155,7 +200,7 @@
       } else {
         const at = p.status === 'received' && p.atId ? st(p.atId) : null;
         h += `<div class="pg-h"><b>Pig / scraper</b><span>${at ? `recibido en ${esc(at.shortName)}${p.relaunchInH != null ? ' · relanza en ' + hhmm(p.relaunchInH) : ''}` : 'sin pig en línea'}</span></div>`;
-        h += `<p class="me-note">Con ${n0(s.segmentFlows.ph)} m³/h el crudo avanza a ${fmt(vLine, 2)} km/h: PH→LC ≈ ${hhmm(530 / Math.max(0.1, vLine))} más las maniobras en cada trampa.</p>`;
+        h += `<p class="me-note">Con ${n0(s.segmentFlows.ph)} m³/h el crudo avanza a ${fmt(vLine, 2)} km/h: ${esc(HN)}→${esc(TN)} ≈ ${hhmm((META.lengthKm || 530) / Math.max(0.1, vLine))} más las maniobras en cada trampa.</p>`;
       }
       if (compact) return h + (p.active ? '' : `<button type="button" class="sc-btn" data-gosub="integridad">Programar corrida de pig</button>`) + '</div>';
       if (!p.active) {
@@ -205,7 +250,7 @@
         const lp = s.linepack && s.linepack[sg.id];
         h += `<tr><td class="mono">${a.shortName}–${b.shortName}</td><td class="r mono">${sg.lengthKm}</td><td class="r mono">${sg.maopKgCm2}</td><td class="r mono">${fmt(pmax)}</td><td class="r mono ${pmin < 2 ? 'bad' : ''}">${fmt(pmin)}</td><td class="r mono ${pct >= 90 ? 'bad' : ''}">${fmt(pct, 0)} %</td><td class="r mono">${n0(lp && lp.m3)}</td></tr>`;
       }
-      h += `</tbody></table><p class="me-note">P mín &lt; 2 kg/cm² indica riesgo de separación de columna en puntos altos (peak PK 198 y PK 375). Linepack total: <b>${n0(linepackTotal())} m³</b>.</p>`;
+      h += `</tbody></table><p class="me-note">P mín &lt; 2 kg/cm² indica riesgo de separación de columna en puntos altos (${CUST ? 'punto alto PK ' + Math.round(META.peakPkKm || 0) : 'peak PK 198 y PK 375'}). Linepack total: <b>${n0(linepackTotal())} m³</b>.</p>`;
       h += `<h3 class="sc-h3">Simulación de pérdida de integridad</h3><div class="in-ctl"><label>PK <input type="number" id="in-pk" min="1" max="529" value="${r.active ? Math.round(r.pkKm) : 212}"></label><label>Severidad <select id="in-sev"><option value="0.3">Fisura (30 %)</option><option value="0.75" selected>Rotura parcial (75 %)</option><option value="1">Rotura total</option></select></label><button type="button" class="sc-btn exec" data-in="leak">Simular fuga</button><button type="button" class="sc-btn" data-in="isolate" ${r.active && !r.isolated ? '' : 'disabled'}>Aislar tramo con VB</button><button type="button" class="sc-btn" data-in="ok" ${r.active ? '' : 'disabled'}>Integridad verificada · normalizar</button></div>`;
       if (r.active) h += `<div class="ev-cd ${r.isolated ? '' : 'out'}"><span class="ev-eyebrow">Evento de integridad</span><b>${r.isolated ? 'Tramo aislado' : 'Fuga activa'} · PK ${fmt(r.pkKm, 0)}</b><p>Caudal de pérdida estimado ${fmt(leakQ(), 0)} m³/h. ${r.isolated ? 'VB cerradas aguas arriba y abajo.' : 'Cerrá las VB más cercanas para limitar el derrame.'}</p></div>`;
       h += '</div><div>';
@@ -221,7 +266,8 @@
     function terminal() {
       const s = S(), lc = st('lc'), ref = s.config.refinery || { programM3d: 16500 };
       const tks = lc.tanks || [];
-      const inlet = s.segmentFlows.lc || 0, outRate = ref.programM3d / 24;
+      const PORT = ref.mode === 'puerto';
+      const inlet = s.segmentFlows.lc || 0, outRate = PORT ? (s.port && s.port.berthed ? (ref.loadRateM3h || 3000) : 0) : ref.programM3d / 24;
       const invTk = tks.reduce((a, t) => a + (t.volumeM3 || 0), 0);
       const extr = tks.reduce((a, t) => a + Math.max(0, (t.volumeM3 || 0) - (t.minOpM3 || 4000)), 0);
       const recv = tks.find((t) => t.mode === 'recibe');
@@ -230,14 +276,25 @@
       let h = '<div class="tl-grid"><div class="tl-tanks">';
       for (const t of tks) {
         const pct = t.volumeM3 / t.capacityM3 * 100, maxP = t.maxOpM3 / t.capacityM3 * 100, minP = t.minOpM3 / t.capacityM3 * 100;
-        const mode = { recibe: 'RECIBE DEL DUCTO', entrega: 'ENTREGA A REFINERÍA', reposo: 'REPOSO / DRENAJE', espera: 'EN ESPERA' }[t.mode] || t.mode;
+        const mode = { recibe: 'RECIBE DEL DUCTO', entrega: PORT ? 'CARGA DE BUQUE' : DKIND === 'parque' ? 'DESPACHO' : 'ENTREGA A REFINERÍA', reposo: 'REPOSO / DRENAJE', espera: 'EN ESPERA' }[t.mode] || t.mode;
         h += `<div class="tl-tank"><div class="tl-name">${esc(t.name)}</div><div class="tl-shell"><div class="tl-fill ${t.mode}" style="height:${pct.toFixed(1)}%"></div><i class="tl-max" style="bottom:${maxP}%"><span>máx. op.</span></i><i class="tl-min" style="bottom:${minP}%"><span>fondo</span></i></div><b>${n0(t.volumeM3)} m³</b><span class="tl-pct">${fmt(pct, 1)} % de ${n0(t.capacityM3)}</span><em class="tl-mode ${t.mode}">${mode}</em>${t.mode === 'reposo' ? `<span class="tl-pct">libera en ${hhmm(t.settleLeftH)}</span>` : ''}${t.mode === 'recibe' ? `<span class="tl-pct">+${n0(inlet)} m³/h</span>` : t.mode === 'entrega' ? `<span class="tl-pct">−${n0(outRate)} m³/h</span>` : ''}</div>`;
       }
       h += '</div><div>';
-      h += `<h3 class="sc-h3">Inventario</h3><div class="me-bal-grid"><div><span>En tanques</span><b>${n0(invTk)} m³</b></div><div><span>Extraíble (sobre fondo)</span><b>${n0(extr)} m³</b></div><div><span>Linepack del ducto</span><b>${n0(linepackTotal())} m³</b></div><div><span>Inventario total</span><b>${n0(invTk + linepackTotal())} m³</b></div><div><span>Autonomía de refinería</span><b>${hhmm(extr / Math.max(1, outRate))}</b></div><div class="${toFull != null && toFull < 6 ? 'bad' : ''}"><span>Tanque receptor lleno en</span><b>${toFull == null ? '—' : hhmm(toFull)}</b></div><div class="${net > 0 ? '' : 'bad'}"><span>Balance diario terminal</span><b>${net >= 0 ? '+' : ''}${n0(net)} m³/d</b></div></div>`;
+      h += `<h3 class="sc-h3">Inventario</h3><div class="me-bal-grid"><div><span>En tanques</span><b>${n0(invTk)} m³</b></div><div><span>Extraíble (sobre fondo)</span><b>${n0(extr)} m³</b></div><div><span>Linepack del ducto</span><b>${n0(linepackTotal())} m³</b></div><div><span>Inventario total</span><b>${n0(invTk + linepackTotal())} m³</b></div><div><span>${CUST ? (PORT ? 'Volumen para carga' : 'Autonomía de ' + esc(DEST)) : 'Autonomía de refinería'}</span><b>${CUST && PORT ? n0(extr) + ' m³' : hhmm(extr / Math.max(1, outRate))}</b></div><div class="${toFull != null && toFull < 6 ? 'bad' : ''}"><span>Tanque receptor lleno en</span><b>${toFull == null ? '—' : hhmm(toFull)}</b></div><div class="${net > 0 ? '' : 'bad'}"><span>Balance diario terminal</span><b>${net >= 0 ? '+' : ''}${n0(net)} m³/d</b></div></div>`;
+      if (CUST && PORT) {
+        const P = s.port || {};
+        h += `<h3 class="sc-h3">Puerto · ${esc(ref.name || DEST)}</h3><div class="me-bal-grid"><div><span>Buque</span><b>${P.berthed ? 'amarrado' : 'en espera'}</b></div><div><span>Cargado</span><b>${n0(P.loadedM3 || 0)} / ${n0(ref.shipM3)} m³</b></div><div><span>Próximo arribo</span><b>${P.berthed ? '—' : hhmm(P.nextShipH != null ? P.nextShipH : ref.firstShipH || 8)}</b></div><div><span>Buques cargados</span><b>${Math.max(0, (P.ships || 0) - (P.berthed ? 1 : 0))}</b></div></div>`;
+        h += `<div class="in-ctl"><label>Lote por buque <input type="number" id="tl-ship" min="1000" step="1000" value="${ref.shipM3}"> m³</label><label>Caudal de carga <input type="number" id="tl-load" min="100" step="100" value="${ref.loadRateM3h}"> m³/h</label><label>Intervalo entre buques <input type="number" id="tl-int" min="2" step="1" value="${ref.shipIntervalH}"> h</label><button type="button" class="sc-btn exec" data-tl="port">Aplicar</button><button type="button" class="sc-btn" data-tl="swap">Cambiar tanque receptor</button></div>`;
+        h += `<p class="me-note">Un tanque recibe del ducto, otro carga el buque amarrado y el resto queda en reposo o en espera. Si no queda un tanque libre, hay que bajar el bombeo en ${esc(HN)}. Recibo actual ${n0(inlet)} m³/h.</p>`;
+      } else if (CUST) {
+        const lab = DKIND === 'parque' ? 'Programa de despacho' : 'Programa de ' + esc(DEST);
+        h += `<h3 class="sc-h3">${lab}</h3><div class="in-ctl"><label>Despacho programado <input type="number" id="tl-prog" min="0" step="100" value="${ref.programM3d}"> m³/d</label><button type="button" class="sc-btn exec" data-tl="prog">Aplicar programa</button><button type="button" class="sc-btn" data-tl="swap">Cambiar tanque receptor</button></div>`;
+        h += `<p class="me-note">Un tanque recibe del ducto mientras otro entrega a ${esc(DEST)}. Al llegar al máximo operativo pasa a reposo y drenaje (${(ref.settleHours || 6)} h). Si no queda un tanque libre, hay que bajar el bombeo en ${esc(HN)}. Recibo actual ${n0(inlet)} m³/h contra un programa de ${n0(outRate)} m³/h.</p>`;
+      } else {
       h += `<h3 class="sc-h3">Programa de refinería</h3><div class="in-ctl"><label>Carga programada <input type="number" id="tl-prog" min="0" max="25000" step="100" value="${ref.programM3d}"> m³/d</label><button type="button" class="sc-btn exec" data-tl="prog">Aplicar programa</button><button type="button" class="sc-btn" data-tl="swap">Cambiar tanque receptor</button></div>`;
       h += `<p class="me-note">Un tanque recibe del ducto mientras el otro entrega a refinería. Al llegar al máximo operativo pasa a reposo y drenaje de agua (${(ref.settleHours || 6)} h) antes de entregar. Si los dos están ocupados, hay que bajar el bombeo en PH. Recibo actual ${n0(inlet)} m³/h contra un programa de ${n0(outRate)} m³/h.</p>`;
       h += `<p class="me-note">Capacidades supuestas: 20.000 m³ nominal, 17.500 m³ máximo operativo y 4.000 m³ de fondo por tanque. Se editan en <code>stations-data.js</code>.</p>`;
+      }
       h += '</div></div>';
       return h;
     }
@@ -253,7 +310,7 @@
         const r = d.rows[u.k];
         h += `<tr><td><b>${u.k}</b> <span class="me-last">${esc(u.name)}</span></td><td>${u.owner}</td><td class="r mono">${n0(r.gov)}</td><td class="r mono">${r.mf.toFixed(4)}</td><td class="r mono">${fmt(r.T)}</td><td class="r mono">${fmt(r.P)}</td><td class="r mono">${r.ctl.toFixed(5)}</td><td class="r mono">${r.cpl.toFixed(5)}</td><td class="r mono">${n0(r.gsv)}</td><td class="r mono">${fmt(r.bsw, 2)}</td><td class="r mono"><b>${n0(r.nsv)}</b></td><td class="r mono">${fmt(r.dens, 1)}</td><td class="r mono">${fmt(r.api, 1)}</td></tr>`;
       }
-      h += `</tbody></table></div><div class="me-bal-grid" style="margin-top:8px"><div><span>Entradas NSV</span><b>${n0(d.in)} m³</b></div><div><span>Recibo LC NSV</span><b>${n0(d.out)} m³</b></div><div><span>Δ linepack</span><b>${n0(d.dLp)} m³</b></div><div class="${Math.abs(d.pct) > 0.089 ? 'bad' : ''}"><span>Diferencia del día</span><b>${d.diff >= 0 ? '+' : ''}${n0(d.diff)} m³ · ${fmt(d.pct, 3)} %</b></div></div>`;
+      h += `</tbody></table></div><div class="me-bal-grid" style="margin-top:8px"><div><span>Entradas NSV</span><b>${n0(d.in)} m³</b></div><div><span>Recibo ${esc(TN)} NSV</span><b>${n0(d.out)} m³</b></div><div><span>Δ linepack</span><b>${n0(d.dLp)} m³</b></div><div class="${Math.abs(d.pct) > 0.089 ? 'bad' : ''}"><span>Diferencia del día</span><b>${d.diff >= 0 ? '+' : ''}${n0(d.diff)} m³ · ${fmt(d.pct, 3)} %</b></div></div>`;
       h += `<p class="me-note">GOV = volumen bruto del computador de flujo (pulsos × MF). GSV = GOV × CTL × CPL (corregido a 15 °C y presión atmosférica). NSV = GSV × (1 − BS&W). El cierre se genera solo a las 06:00 del tiempo simulado; con 720× pasa cada 2 minutos.</p><div class="me-btns"><button type="button" class="sc-btn exec" data-close-day="1">Forzar cierre ahora</button><button type="button" class="sc-btn" data-csv="cierre">Exportar cierre (CSV)</button></div>`;
       return h;
     }
@@ -264,7 +321,7 @@
       const sumIn = month.reduce((a, d) => a + d.in, 0), sumDiff = month.reduce((a, d) => a + d.diff, 0);
       const pctM = sumIn ? sumDiff / sumIn * 100 : 0;
       const tolM = 0.089, tolA = 0.026;
-      let h = `<div class="cu-head"><div class="cu-kpi"><span>Bombeo diario promedio</span><b>${n0(month.reduce((a, d) => a + d.out, 0) / Math.max(1, month.length))} m³/d</b><i>objetivo 16.500 · 85 % del crudo de CILC</i></div><div class="cu-kpi ${Math.abs(pctM) > tolM ? 'bad' : 'ok'}"><span>Balance LC – resto · 30 días</span><b>${sumDiff >= 0 ? '+' : ''}${n0(sumDiff)} m³</b><i>${pctM >= 0 ? '+' : ''}${fmt(pctM, 3)} % · tolerancia mensual ± ${tolM} % (± ${n0(sumIn * tolM / 100)} m³)</i></div><div class="cu-kpi"><span>Tolerancia anual</span><b>± ${tolA} %</b><i>± ${n0(sumIn * 12 * tolA / 100)} m³ proyectado</i></div><div class="cu-kpi"><span>Medición</span><b>8 UAM · 5 lab.</b><i>5 propias y 3 de terceros</i></div></div>`;
+      let h = `<div class="cu-head"><div class="cu-kpi"><span>Bombeo diario promedio</span><b>${n0(month.reduce((a, d) => a + d.out, 0) / Math.max(1, month.length))} m³/d</b><i>${CUST ? 'plan ' + n0(META.dailyPlanM3d) + ' m³/d' : 'objetivo 16.500 · 85 % del crudo de CILC'}</i></div><div class="cu-kpi ${Math.abs(pctM) > tolM ? 'bad' : 'ok'}"><span>Balance ${esc(TN)} – resto · 30 días</span><b>${sumDiff >= 0 ? '+' : ''}${n0(sumDiff)} m³</b><i>${pctM >= 0 ? '+' : ''}${fmt(pctM, 3)} % · tolerancia mensual ± ${tolM} % (± ${n0(sumIn * tolM / 100)} m³)</i></div><div class="cu-kpi"><span>Tolerancia anual</span><b>± ${tolA} %</b><i>± ${n0(sumIn * 12 * tolA / 100)} m³ proyectado</i></div><div class="cu-kpi"><span>Medición</span><b>${UAM.length} UAM · ${LABS.length} lab.</b><i>${UAM.filter((u) => u.owner === 'Propia').length} propias y ${UAM.filter((u) => u.owner !== 'Propia').length} de terceros</i></div></div>`;
       // gráfico diario
       const W = 1000, H = 200, pad = 40;
       const vals = month.slice().reverse();
@@ -344,13 +401,21 @@
       }
       if (d.tl === 'prog') {
         const v = Number(document.getElementById('tl-prog').value);
-        if (isFinite(v) && v >= 0) { s.config.refinery = Object.assign(s.config.refinery || {}, { programM3d: v }); ctx.evLog(`Programa de refinería: ${v} m³/d`); }
+        if (isFinite(v) && v >= 0) { s.config.refinery = Object.assign(s.config.refinery || {}, { programM3d: v }); ctx.evLog(`Programa de ${CUST ? DEST : 'refinería'}: ${v} m³/d`); }
+        return true;
+      }
+      if (d.tl === 'port') {
+        const r = s.config.refinery;
+        const sh = Number(document.getElementById('tl-ship').value), ld = Number(document.getElementById('tl-load').value), iv = Number(document.getElementById('tl-int').value);
+        if (sh > 0) r.shipM3 = sh; if (ld > 0) r.loadRateM3h = ld; if (iv > 0) r.shipIntervalH = iv;
+        ctx.evLog(`Puerto: lote ${r.shipM3} m³ · carga ${r.loadRateM3h} m³/h · cada ${r.shipIntervalH} h`);
         return true;
       }
       if (d.tl === 'swap') {
         const tks = st('lc').tanks;
-        const r = tks.find((x) => x.mode === 'recibe'), o = tks.find((x) => x !== r);
-        if (r && o) { r.mode = 'reposo'; r.settleLeftH = (s.config.refinery && s.config.refinery.settleHours) || 6; o.mode = 'recibe'; ctx.evLog(`Terminal LC: ${o.name} pasa a recibir`); }
+        const r = tks.find((x) => x.mode === 'recibe');
+        const o = CUST ? tks.filter((x) => x !== r && x.mode !== 'entrega').sort((a, b) => a.volumeM3 - b.volumeM3)[0] : tks.find((x) => x !== r);
+        if (r && o) { r.mode = 'reposo'; r.settleLeftH = (s.config.refinery && s.config.refinery.settleHours) || 6; r.ready = false; o.mode = 'recibe'; o.ready = false; ctx.evLog(`Terminal ${TN}: ${o.name} pasa a recibir`); }
         return true;
       }
       if (d.day != null) { dSel = Number(d.day); return true; }

@@ -2,7 +2,7 @@
 (function (global) {
   'use strict';
   const NS = 'http://www.w3.org/2000/svg';
-  const ORDER = ['ph', 'ac', 'cd', 'mg', 'sos', 'pa', 'rt', 'ug', 'lc'];
+  const ORDER_BETA = ['ph', 'ac', 'cd', 'mg', 'sos', 'pa', 'rt', 'ug', 'lc'];
 
   function el(tag, attrs, parent) {
     const e = document.createElementNS(NS, tag);
@@ -17,10 +17,29 @@
     const sim = app.sim;
     const svg = document.getElementById('hmi-svg');
     const X0 = 80, X1 = 1320;
+    const META = (app.config && app.config._meta) || {};
+    const CUST = !!META.custom;
+    const ORDER = CUST ? sim.sortedStations().slice().sort((a, b) => (a.pkKm || 0) - (b.pkKm || 0)).map((x) => x.id) : ORDER_BETA;
+    const HN = (sim.stationById('ph') || {}).shortName || 'PH';
+    const TN = (sim.stationById('lc') || {}).shortName || 'LC';
+    // escala vertical del perfil
+    let YMIN = 0, YMAX = 4000, YSTEP = 1000;
+    if (CUST) {
+      let eMin = Infinity, eMax = -Infinity;
+      for (const sm of app.geo.samples) { eMin = Math.min(eMin, sm.e); eMax = Math.max(eMax, sm.e); }
+      const rho = (app.config.hydraulics && app.config.hydraulics.fluidDensity_kg_m3) || 860;
+      const head = (META.opMaxKgCm2 || 80) * 1e5 / (rho * 9.81);
+      const hi = Math.max(eMax + 100, app.geo.elevAt(0) + head * 1.05);
+      const span0 = Math.max(100, hi - Math.min(eMin, 0 < eMin ? eMin : eMin));
+      const nice = [10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000];
+      YSTEP = nice.find((n) => span0 / n <= 5) || 2000;
+      YMIN = Math.floor((eMin - YSTEP * 0.2) / YSTEP) * YSTEP;
+      YMAX = Math.ceil(hi / YSTEP) * YSTEP;
+    }
     const xs = {};
     ORDER.forEach((id, i) => { xs[id] = X0 + i * ((X1 - X0) / (ORDER.length - 1)); });
     const refs = {};
-    let selected = 'cd';
+    let selected = CUST ? (ORDER.includes('cd') ? 'cd' : ORDER[Math.min(1, ORDER.length - 1)]) : 'cd';
     let pending = null; // acción de dos pasos: {kind, id, sub, value, label}
     const trend = [];
     let lastSample = -1;
@@ -119,8 +138,8 @@
       const T = 330, B = 530;
       refs.prof = { T, B };
       el('text', { x: X0, y: T - 12, class: 'hmi-t-lab' }, svg).textContent = 'Perfil hidráulico · cota del terreno y línea piezométrica (m s. n. m.)';
-      for (let m = 0; m <= 4000; m += 1000) {
-        const y = B - (m / 4000) * (B - T);
+      for (let m = YMIN; m <= YMAX; m += YSTEP) {
+        const y = B - ((m - YMIN) / (YMAX - YMIN)) * (B - T);
         el('line', { x1: X0, x2: X1, y1: y, y2: y, stroke: 'var(--hmi-grid)', 'stroke-width': 1 }, svg);
         el('text', { x: X0 - 8, y: y + 4, 'text-anchor': 'end', class: 'hmi-t-small' }, svg).textContent = m.toLocaleString('es-AR');
       }
@@ -134,8 +153,9 @@
         el('line', { x1: x, x2: x, y1: T, y2: B, stroke: 'var(--hmi-grid)', 'stroke-width': 1, 'stroke-dasharray': '2 3' }, svg);
         el('text', { x, y: B + 16, 'text-anchor': 'middle', class: 'hmi-t-small' }, svg).textContent = st.shortName || id;
       }
-      const peakX = profX(198);
-      el('text', { x: peakX + 6, y: B - (1985 / 4000) * (B - T) - 8, class: 'hmi-t-small' }, svg).textContent = 'Peak 1.985 m';
+      const pkPk = CUST ? (META.peakPkKm || 0) : 198, pkE = CUST ? app.geo.elevAt(META.peakPkKm || 0) : 1985;
+      const peakX = profX(pkPk);
+      el('text', { x: peakX + 6, y: B - ((pkE - YMIN) / (YMAX - YMIN)) * (B - T) - 8, class: 'hmi-t-small' }, svg).textContent = (CUST ? 'Punto alto ' : 'Peak ') + Math.round(pkE).toLocaleString('es-AR') + ' m';
       const lg = el('g', { transform: `translate(${X1 - 360} ${T - 16})` }, svg);
       el('line', { x1: 0, x2: 22, y1: -4, y2: -4, stroke: 'var(--hmi-fg)', 'stroke-width': 2.2 }, lg);
       el('text', { x: 28, y: 0, class: 'hmi-t-small' }, lg).textContent = 'HGL';
@@ -145,9 +165,9 @@
       el('text', { x: 216, y: 0, class: 'hmi-t-small' }, lg).textContent = 'Terreno';
 
       // trazado del terreno (fijo)
-      const yOf = (m) => B - (Math.max(0, Math.min(4000, m)) / 4000) * (B - T);
+      const yOf = (m) => B - ((Math.max(YMIN, Math.min(YMAX, m)) - YMIN) / (YMAX - YMIN)) * (B - T);
       let d = `M${X0} ${B}`;
-      for (let pk = 0; pk <= app.geo.L; pk += 3) d += ` L${profX(pk).toFixed(1)} ${yOf(app.geo.elevAt(pk)).toFixed(1)}`;
+      for (let pk = 0; pk <= app.geo.L; pk += Math.max(0.05, app.geo.L / 180)) d += ` L${profX(pk).toFixed(1)} ${yOf(app.geo.elevAt(pk)).toFixed(1)}`;
       d += ` L${X1} ${B} Z`;
       refs.terrain.setAttribute('d', d);
       refs.yOf = yOf;
@@ -375,7 +395,7 @@
       document.getElementById('hmi-dra').addEventListener('change', (e) => sim.setDra(e.target.checked));
       document.getElementById('hmi-pig').addEventListener('click', () => {
         const ok = sim.launchPig();
-        app.toast(ok === false ? 'Ya hay un pig en la línea' : 'Pig lanzado desde PH');
+        app.toast(ok === false ? 'Ya hay un pig en la línea' : 'Pig lanzado desde ' + HN);
       });
       document.getElementById('hmi-normal').addEventListener('click', () => { app.normalOps(); app.toast('Línea en operación normal'); });
       document.getElementById('hmi-ack-all').addEventListener('click', () => app.alarms.ackAll());
@@ -399,7 +419,7 @@
       const k = [
         ['Caudal cabecera', fmt(S.segmentFlows.ph, 0), 'm³/h'],
         ['Pig', S.pig && S.pig.active ? 'PK ' + fmt(S.pig.pkKm, 0) : 'sin pig', ''],
-        ['Recibo LC', fmt(S.segmentFlows.lc, 0), 'm³/h'],
+        ['Recibo ' + TN, fmt(S.segmentFlows.lc, 0), 'm³/h'],
         ['Cumplimiento del plan', fmt(imp.pctDailyPlan, 0), '%'],
         ['Pérdida acumulada', fmt(imp.cumulativeLostM3, 0), 'm³'],
         ['Costo de oportunidad', 'USD ' + Math.round(imp.opportunityUsd || 0).toLocaleString('es-AR'), ''],
@@ -456,10 +476,11 @@
       g.strokeStyle = col('--hmi-grid'); g.lineWidth = 1;
       g.font = '11px "IBM Plex Mono", ui-monospace, monospace';
       g.fillStyle = col('--hmi-fg2');
+      const QM = CUST ? Math.max(100, Math.ceil(((META.defaultLcReceiptTargetM3h || 800) * 1.25) / 100) * 100) : 800;
       for (let i = 0; i <= 4; i++) {
         const y = T + (B - T) * i / 4;
         g.beginPath(); g.moveTo(L, y); g.lineTo(R, y); g.stroke();
-        g.textAlign = 'right'; g.fillText(String(800 - i * 200), L - 6, y + 4);
+        g.textAlign = 'right'; g.fillText(String(Math.round(QM - i * QM / 4)), L - 6, y + 4);
         g.textAlign = 'left'; g.fillText(String(100 - i * 25), R + 6, y + 4);
       }
       g.save(); g.textAlign = 'left'; g.fillText('m³/h', 4, T + 4); g.textAlign = 'right'; g.fillText('kg/cm² · %', w - 2, h - 6); g.restore();
@@ -470,7 +491,7 @@
       }
       const t1 = trend[trend.length - 1].t, t0 = Math.min(trend[0].t, t1 - 1);
       const X = (t) => L + (R - L) * (t - t0) / Math.max(1, t1 - t0);
-      const YQ = (v) => B - (B - T) * Math.max(0, Math.min(800, v)) / 800;
+      const YQ = (v) => B - (B - T) * Math.max(0, Math.min(QM, v)) / QM;
       const YP = (v) => B - (B - T) * Math.max(0, Math.min(100, v)) / 100;
       // ticks de tiempo
       g.fillStyle = col('--hmi-fg2'); g.textAlign = 'center';
@@ -499,7 +520,7 @@
     function renderLegend() {
       const s = sim.stationById(selected);
       document.getElementById('hmi-trend-legend').innerHTML =
-        `<span class="l1">Recibo LC (m³/h)</span><span class="l2">P llegada LC (kg/cm²)</span><span class="l3">P descarga ${esc(s ? s.shortName : '')} (kg/cm²)</span><span class="l4">% MAOP máximo</span>`;
+        `<span class="l1">Recibo ${esc(TN)} (m³/h)</span><span class="l2">P llegada ${esc(TN)} (kg/cm²)</span><span class="l3">P descarga ${esc(s ? s.shortName : '')} (kg/cm²)</span><span class="l4">% MAOP máximo</span>`;
     }
 
     build();

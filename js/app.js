@@ -29,7 +29,7 @@
     sim.applyScenario('clear');
     if (sim.state.impact) sim.state.impact.crisisMode = null;
     if (sim.state.pig && sim.state.pig.active && !sim.state.pig.stuck) { /* el pig sigue su recorrido */ }
-    sim.setFlowSetpoint(680);
+    sim.setFlowSetpoint((sim.state.config._meta && sim.state.config._meta.custom && sim.state.config._meta.defaultPhCabeceraM3h) || 680);
     sim.state.flowTarget = null;
     sim.setDra(true);
     sim.computeHydraulics();
@@ -110,13 +110,60 @@
     $('x-ab-ack').disabled = !n;
   }
 
+  // v8: textos del shell para un ducto a medida
+  function customizeShell(config, sim) {
+    const M = config._meta;
+    const H = sim.stationById('ph'), T = sim.stationById('lc');
+    const hn = H.shortName, tn = T.shortName;
+    const L = Math.round(M.lengthKm);
+    const q = (sel) => document.querySelector(sel);
+    const set = (sel, t) => { const el = q(sel); if (el) el.textContent = t; };
+    document.title = `${M.shortTitle} · simulador`;
+    set('.x-brand-name', M.shortTitle);
+    set('.x-brand-sub', `${hn} → ${tn} · ${L} km · ${M.diameterInch} in`);
+    const ql = $('x-qlc'); if (ql && ql.previousElementSibling) ql.previousElementSibling.textContent = 'Recibo ' + tn;
+    set('#v3d-cine-txt', `${M.shortTitle} · PK 0`);
+    set('#view-scada .hmi-overview h2', `Vista general · ${M.shortTitle} ${hn}–${tn}`);
+    set('.hmi-dispatch .hmi-hint', 'Cabecera ' + hn);
+    const sp = $('hmi-sp');
+    if (sp) { sp.max = String(M.maxLineFlowM3h); sp.step = String(Math.max(1, Math.round(M.maxLineFlowM3h / 100))); sp.value = String(M.defaultPhCabeceraM3h); }
+    set('.ing-brand', `${String(M.shortTitle).toUpperCase()} · SCADA`);
+    // menú lateral del SCADA: estaciones del ducto
+    const side = $('ing-side');
+    if (side) {
+      side.querySelectorAll('[data-go^="st:"]').forEach((b) => b.remove());
+      side.querySelectorAll('[data-go="terminal"]').forEach((b) => { b.textContent = 'Tanques ' + tn; });
+      for (const st of sim.sortedStations().slice().sort((a, b) => (a.pkKm || 0) - (b.pkKm || 0))) {
+        const b = document.createElement('button');
+        b.type = 'button'; b.dataset.go = 'st:' + st.id; b.textContent = st.shortName;
+        side.appendChild(b);
+      }
+    }
+    // textos del desafío y la bienvenida
+    const plan = Math.round(M.dailyPlanM3d || 0);
+    const swap = (root) => {
+      if (!root) return;
+      const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const rep = [['Puesto Hernández', H.name], ['Luján de Cuyo', T.name], ['16.500 m³ por día', plan.toLocaleString('es-AR') + ' m³ por día'], ['unos 690 m³/h', 'unos ' + Math.round(plan / 24) + ' m³/h'], ['m³ en LC', 'm³ en ' + tn]];
+      let n; while ((n = w.nextNode())) { let t = n.nodeValue; for (const [a, b] of rep) t = t.split(a).join(b); if (t !== n.nodeValue) n.nodeValue = t; }
+    };
+    swap($('view-desafio')); swap($('g-hud'));
+    set('.x-intro-eyebrow', `${M.client ? M.client + ' · ' : ''}${L} km · cota máxima ${Math.round(M.peakElevM || 0).toLocaleString('es-AR')} m · ${M.diameterInch} in`);
+    const h1 = q('.x-intro-card h1'); if (h1) h1.innerHTML = `${M.shortTitle}: ${L} km de ${String(M.fluidName || 'crudo').toLowerCase()} de ${hn} a ${tn}.<br>Vos estás a cargo.`;
+    const p1 = q('.x-intro-card h1 + p');
+    if (p1) p1.textContent = `Ducto generado con el constructor: ${sim.state.stations.length} estaciones, ${sim.state.valves.length} válvulas de bloqueo, caño de ${M.diameterInch} in y destino en ${M.destName}. Física real sobre la altimetría del trazado.`;
+    const b = $('x-build');
+    if (b) { b.textContent = 'Editar ducto'; b.href = 'constructor.html?id=' + encodeURIComponent(M.specId); }
+  }
+
   function boot(e) {
     const { sim, config } = e.detail;
     app.sim = sim;
     app.config = config;
+    if (config._meta && config._meta.custom) { try { customizeShell(config, sim); } catch (err) { console.error(err); } }
     app.geo = window.GEO.build(config);
     app.alarms = window.createAlarmManager(sim);
-    app.profile = window.GEO.pressureProfile(sim, app.geo, 5);
+    app.profile = window.GEO.pressureProfile(sim, app.geo, app.geo.profStep || 5);
     initShell();
     app.scada = window.createScada(app);
     app.game = window.createGame(app);
@@ -124,6 +171,7 @@
     const start = location.hash ? location.hash.slice(1) : 'vista-3d';
     app.go(start);
     window.dispatchEvent(new CustomEvent('app-ready', { detail: app }));
+    if (window.CUSTOM_ERROR) setTimeout(() => app.toast(window.CUSTOM_ERROR), 600);
 
     let last = performance.now(), acc = 0;
     function frame(now) {
@@ -133,7 +181,7 @@
       acc += dt;
       if (acc > 0.2) {
         acc = 0;
-        app.profile = window.GEO.pressureProfile(sim, app.geo, 5);
+        app.profile = window.GEO.pressureProfile(sim, app.geo, app.geo.profStep || 5);
         updateTop();
       }
       app.scada.update(dt, app.view === 'scada');

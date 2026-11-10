@@ -3,11 +3,10 @@
 (function (global) {
   'use strict';
 
-  const ST = ['ph', 'ac', 'cd', 'mg', 'sos', 'pa', 'rt', 'ug', 'lc'];
-  const PUMP_ST = ['ph', 'ac', 'cd', 'mg', 'sos', 'rt'];
-  const METER_ST = ['ph', 'ac', 'cd', 'mg', 'sos', 'rt', 'ug', 'lc'];
-  const TAGN = { ph: 100, ac: 200, cd: 300, mg: 400, sos: 1100, pa: 5800, rt: 700, ug: 600, lc: 1200 };
-  const NAME = { ph: 'PUESTO HERNÁNDEZ', ac: 'AGUAS DEL CARRIZO', cd: 'CERRO DIVISADERO', mg: 'MALARGÜE', sos: 'EL SOSNEADO', pa: 'PAREDITAS', rt: 'RÍO TUNUYÁN', ug: 'UGARTECHE', lc: 'LUJÁN DE CUYO' };
+  const ST_B = ['ph', 'ac', 'cd', 'mg', 'sos', 'pa', 'rt', 'ug', 'lc'];
+  const METER_ST_B = ['ph', 'ac', 'cd', 'mg', 'sos', 'rt', 'ug', 'lc'];
+  const TAGN_B = { ph: 100, ac: 200, cd: 300, mg: 400, sos: 1100, pa: 5800, rt: 700, ug: 600, lc: 1200 };
+  const NAME_B = { ph: 'PUESTO HERNÁNDEZ', ac: 'AGUAS DEL CARRIZO', cd: 'CERRO DIVISADERO', mg: 'MALARGÜE', sos: 'EL SOSNEADO', pa: 'PAREDITAS', rt: 'RÍO TUNUYÁN', ug: 'UGARTECHE', lc: 'LUJÁN DE CUYO' };
   const fmt = (v, d) => (v == null || !isFinite(v) ? '—' : Number(v).toFixed(d == null ? 1 : d));
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   function gauss() { let u = 0, v = 0; while (!u) u = Math.random(); while (!v) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
@@ -17,6 +16,19 @@
     const S = () => sim.state;
     const $ = (id) => document.getElementById(id);
     const root = $('ing-main');
+    // v8: estaciones, tags y nombres desde la configuración (ductos a medida)
+    const META = sim.state.config._meta || {};
+    const CUST = !!META.custom;
+    const SORTED = sim.sortedStations().slice().sort((a, b) => (a.pkKm || 0) - (b.pkKm || 0));
+    const ST = CUST ? SORTED.map((x) => x.id) : ST_B;
+    const METER_ST = CUST ? SORTED.filter((x) => x.meters && (x.meters.usm || 0) + (x.meters.pd || 0) > 0).map((x) => x.id) : METER_ST_B;
+    const TAGN = CUST ? Object.fromEntries(SORTED.map((x, i) => [x.id, x.tagBase || (i + 1) * 100])) : TAGN_B;
+    const NAME = CUST ? Object.fromEntries(SORTED.map((x) => [x.id, String(x.name).toUpperCase()])) : NAME_B;
+    const HEAD = sim.stationById('ph'), TERM = sim.stationById('lc');
+    const HN = (HEAD && HEAD.shortName) || 'PH', TN = (TERM && TERM.shortName) || 'LC';
+    const QMAX = META.maxLineFlowM3h || 750;
+    const MAOP = META.maopKgCm2 || 90, OPMAX = META.opMaxKgCm2 || 80;
+    const QDEF = META.defaultPhCabeceraM3h || 680;
     let sub = 'principal';
     let stSel = 'ph';
     let pending = null;
@@ -37,13 +49,24 @@
           duty: suffix === 'A',
         };
       };
-      meters[id] = [mk('A', 'USM', 9000), mk('B', 'USM', 9000), mk('P', 'PD', 8400)];
+      if (CUST) {
+        const mm = (sim.stationById(id) || {}).meters || {};
+        const list = [];
+        for (let k = 0; k < Math.min(4, mm.usm || 0); k++) list.push(mk(String.fromCharCode(65 + k), 'USM', 9000));
+        for (let k = 0; k < Math.min(2, mm.pd || 0); k++) list.push(mk(k ? 'Q' : 'P', 'PD', 8400));
+        if (!list.length) list.push(mk('A', 'USM', 9000));
+        if (list.length === 1) list[0].duty = true;
+        meters[id] = list;
+      } else meters[id] = [mk('A', 'USM', 9000), mk('B', 'USM', 9000), mk('P', 'PD', 8400)];
     });
     const trueQ = (id) => (id === 'pa' ? 0 : S().segmentFlows[id] || 0);
     const qInd = (m) => trueQ(m.st) * (1 + m.bias) * m.mf; // caudal indicado y corregido por MF
     const devPct = (m) => ((1 + m.bias) * m.mf - 1) * 100; // error residual frente a la verdad
     function meterAlarm(id) {
-      const [a, b, p] = meters[id];
+      const ms = meters[id];
+      const a = ms[0];
+      const b = ms.find((m, k) => k > 0 && m.type === 'USM') || a;
+      const p = ms.find((m) => m.type === 'PD') || b;
       const ab = Math.abs(qInd(a) - qInd(b)) / Math.max(1, qInd(a)) * 100;
       const ap = Math.abs(qInd(a) - qInd(p)) / Math.max(1, qInd(a)) * 100;
       return { ab, ap, warn: ab > 0.15 || ap > 0.25 };
@@ -66,10 +89,10 @@
       const st = sim.stationById(id);
       if (st && st.pumps) for (const p of st.pumps) if (p.reserve) p.online = false;
       delete ev.elec[id]; delete ev.esd[id];
-      if (!Object.keys(S().failedStations).length && !S().phFailed) sim.rampFlowTo(680);
+      if (!Object.keys(S().failedStations).length && !S().phFailed) sim.rampFlowTo(QDEF);
       evLog(`Rearme de ${st.shortName}: bombas en marcha`);
     }
-    const EVENTS = [
+    const EVENTS = CUST ? customEvents() : [
       { g: 'Eléctricas', k: 'pert-sur', t: 'Perturbación eléctrica · zona sur', d: 'Hueco de tensión en la red: disparan los variadores de PH y AC. Requiere rearme cuando la tensión se normaliza.', run: () => { ['ph', 'ac'].forEach((i) => tripStation(i, 'Perturbación eléctrica')); evLog('Perturbación eléctrica zona sur · PH y AC fuera de servicio'); } },
       { g: 'Eléctricas', k: 'pert-ml', t: 'Perturbación eléctrica · Malargüe–El Sosneado', d: 'Caída de la línea de media tensión: salen ML y ES a la vez. Aguas abajo RT pierde aspiración.', run: () => { ['mg', 'sos'].forEach((i) => tripStation(i, 'Perturbación eléctrica')); evLog('Perturbación eléctrica ML–ES · dos EB fuera'); } },
       { g: 'Eléctricas', k: 'sub-cd', t: 'Falla de subestación en CD', d: 'Sin energía en Cerro Divisadero: las turbobombas paran y el crudo no pasa el peak de 1.985 m.', run: () => { tripStation('cd', 'Falla subestación'); evLog('Falla subestación CD'); } },
@@ -84,15 +107,46 @@
       { g: 'Operativas', k: 'esd', t: 'Paro de emergencia en ES', d: 'Pulsador de paro de emergencia accionado en El Sosneado.', run: () => { sim.failStation('sos'); ev.esd.sos = true; ev.elec.sos = { cause: 'Paro de emergencia', tTrip: S().timeSec, ready: true }; evLog('Paro de emergencia ES'); } },
     ];
 
+    function customEvents() {
+      const pumps = SORTED.filter((x) => x.pumps && x.pumps.length);
+      const mids = pumps.filter((x) => x.id !== 'ph');
+      const sn = (x) => x.shortName;
+      const L = META.lengthKm || 100;
+      const out = [];
+      const a = pumps[0], b = mids[0] || null;
+      out.push({ g: 'Eléctricas', k: 'pert-1', t: `Perturbación eléctrica · ${sn(a)}${b ? ' y ' + sn(b) : ''}`, d: 'Hueco de tensión en la red: disparan los motores. Requiere rearme cuando la tensión se normaliza.', run: () => { [a, b].filter(Boolean).forEach((x) => tripStation(x.id, 'Perturbación eléctrica')); evLog(`Perturbación eléctrica · ${[a, b].filter(Boolean).map(sn).join(' y ')} fuera de servicio`); } });
+      if (mids.length) {
+        const m = mids[Math.floor(mids.length / 2)];
+        out.push({ g: 'Eléctricas', k: 'sub-m', t: `Falla de subestación en ${sn(m)}`, d: `Sin energía en ${m.name}: las bombas paran y el tramo aguas abajo pierde presión.`, run: () => { tripStation(m.id, 'Falla subestación'); evLog(`Falla subestación ${sn(m)}`); } });
+        const l = mids[mids.length - 1];
+        out.push({ g: 'Eléctricas', k: 'sag-l', t: `Microcorte en ${sn(l)}`, d: 'Disparo del variador por un microcorte. Rearme rápido posible.', run: () => { tripStation(l.id, 'Microcorte'); evLog(`Microcorte ${sn(l)}`); } });
+      }
+      const cd = sim.stationById('cd');
+      out.push({ g: 'Cabecera', k: 'ph-cd', t: cd ? `Falla ${HN} · ${sn(cd)} toma la cabecera` : `Falla de la cabecera ${HN}`, d: cd ? `${HEAD.name} sale de servicio. ${cd.name} bombea desde su tanque como cabecera temporal, con caudal reducido.` : `${HEAD.name} sale de servicio y la línea se detiene. Hay que rearmar y volver a llenar en rampa.`, run: () => { sim.failStation('ph'); ev.elec.ph = { cause: 'Falla cabecera', tTrip: S().timeSec, ready: false }; evLog(`Falla ${HN}` + (cd ? ` · ${sn(cd)} cabecera temporal` : '')); } });
+      const f = mids[0] || HEAD;
+      out.push({ g: 'Mecánicas', k: 'filtro', t: `Filtro tapado en ${sn(f)}`, d: 'Sube la presión diferencial del filtro de entrada: cae la aspiración de las bombas.', run: () => { ev.filter[f.id] = 1.8; evLog(`Alta presión diferencial filtro ${sn(f)}`); } });
+      const pb = mids[mids.length - 1] || HEAD;
+      const pOn = (pb.pumps || []).find((p) => p.online && !(p.role || '').includes('booster'));
+      if (pOn) out.push({ g: 'Mecánicas', k: 'bomba', t: `Disparo de bomba en ${sn(pb)} (vibración)`, d: `${pOn.name} sale por alta vibración. Hay que arrancar la reserva desde el P&ID.`, run: () => { sim.setPump(pb.id, pOn.id, false); evLog(`Disparo ${pOn.name} por vibración`); } });
+      out.push({ g: 'Mecánicas', k: 'n2', t: `Baja presión de nitrógeno en ${HN}`, d: 'Alarma de baja presión de N2 en el tubo de sellos. Aviso sin disparo.', run: () => { ev.n2.ph = true; evLog(`Baja presión N2 tubo · ${HN}`); } });
+      const vs = S().valves.slice().sort((x, y) => x.pkKm - y.pkKm);
+      const vm = vs.length > 1 ? Math.floor(vs.length / 2) : -1;
+      const lpk = vm > 0 ? Math.round((vs[vm - 1].pkKm + vs[vm].pkKm) / 2) : Math.round(L * 0.45);
+      out.push({ g: 'Hidráulicas', k: 'fuga', t: `Fuga o rotura en PK ${lpk}`, d: vm > 0 ? `Caída de presión y desbalance de volumen. Aislá con ${vs[vm - 1].name} y ${vs[vm].name}.` : 'Caída de presión y desbalance de volumen. Aislá el tramo con las válvulas más cercanas.', run: () => { S()._pendingRupturePk = lpk; sim.applyScenario('fuga_rotura_pk'); evLog(`Fuga/rotura PK ${lpk}`); } });
+      out.push({ g: 'Hidráulicas', k: 'surge', t: 'Golpe de ariete tras parada', d: 'Onda de sobrepresión: estaciones cerca del 90 % de la MAOP.', run: () => { sim.applyScenario('sobrepresion_surge'); evLog('Golpe de ariete'); } });
+      out.push({ g: 'Operativas', k: 'pig', t: 'Scraper detenido en el punto alto', d: `El pig se frena cerca del PK ${Math.round(META.peakPkKm || 0)} (${Math.round(META.peakElevM || 0)} m).`, run: () => { sim.applyScenario('pig_stuck_peak'); evLog(`Scraper detenido PK ${Math.round(META.peakPkKm || 0)}`); } });
+      const e = mids[0] || HEAD;
+      out.push({ g: 'Operativas', k: 'esd', t: `Paro de emergencia en ${sn(e)}`, d: `Pulsador de paro de emergencia accionado en ${e.name}.`, run: () => { sim.failStation(e.id); ev.esd[e.id] = true; ev.elec[e.id] = { cause: 'Paro de emergencia', tTrip: S().timeSec, ready: true }; evLog(`Paro de emergencia ${sn(e)}`); } });
+      return out;
+    }
+
     function eventTick() {
       for (const id in ev.elec) {
         const e = ev.elec[id];
         if (!e.ready && S().timeSec - e.tTrip > 600) { e.ready = true; evLog(`Tensión normalizada en ${sim.stationById(id).shortName}: listo para rearme`); }
       }
-      // filtro tapado: penaliza la aspiración de AC
-      if (ev.filter.ac && S().pressuresIn.ac != null) {
-        S().pressuresIn.ac = Math.max(0, S().pressuresIn.ac - ev.filter.ac);
-      }
+      // filtro tapado: penaliza la aspiración de la estación
+      for (const fid in ev.filter) if (S().pressuresIn[fid] != null) S().pressuresIn[fid] = Math.max(0, S().pressuresIn[fid] - ev.filter[fid]);
     }
 
     // ---------------- valores por estación ----------------
@@ -145,7 +199,7 @@
 
     // ---------------- sub-vistas ----------------
     function nav() {
-      const items = [['principal', 'Principal'], ['estacion', 'Estación (P&ID)'], ['integridad', 'Integridad'], ['terminal', 'Terminal LC'], ['medicion', 'Medición'], ['cierres', 'Cierres OMNI'], ['custody', 'Custody'], ['alarmlog', 'Hist. alarmas'], ['eventos', 'Eventos y fallas'], ['clasica', 'Consola clásica']];
+      const items = [['principal', 'Principal'], ['estacion', 'Estación (P&ID)'], ['integridad', 'Integridad'], ['terminal', 'Terminal ' + TN], ['medicion', 'Medición'], ['cierres', 'Cierres OMNI'], ['custody', 'Custody'], ['alarmlog', 'Hist. alarmas'], ['eventos', 'Eventos y fallas']].concat(CUST ? [] : [['clasica', 'Consola clásica']]);
       $('ing-nav').innerHTML = items.map(([k, t]) => `<button type="button" class="${k === sub ? 'on' : ''}" data-sub="${k}">${t}</button>`).join('');
     }
     function setSub(k) {
@@ -181,27 +235,27 @@
     }
     function principal() {
       const s = S();
-      const cols = ['ph', 'ac', 'cd', 'mg', 'sos', 'pa', 'rt', 'lc'];
+      const cols = CUST ? ST : ['ph', 'ac', 'cd', 'mg', 'sos', 'pa', 'rt', 'lc'];
       let h = `<div class="sc-head"><div class="sc-route-wrap">${routeStrip()}</div></div>${ext ? ext.pigPanel(true) : ''}<div class="sc-gridwrap"><table class="sc-grid"><thead><tr><th class="sc-rowh"></th>`;
-      h += cols.map((id) => `<th class="sc-col ${id === stSel ? 'sel' : ''}" data-st="${id}">${id === 'lc' ? 'LUJÁN DE CUYO · UGARTECHE' : NAME[id]}</th>`).join('') + '</tr></thead><tbody>';
+      h += cols.map((id) => `<th class="sc-col ${id === stSel ? 'sel' : ''}" data-st="${id}">${id === 'lc' && !CUST ? 'LUJÁN DE CUYO · UGARTECHE' : NAME[id]}</th>`).join('') + '</tr></thead><tbody>';
       const row = (lab, f) => `<tr><th class="sc-rowh">${lab}</th>${cols.map((id) => `<td>${f(id, stv(id))}</td>`).join('')}</tr>`;
       h += row('Caudal m³/h', (id, v) => id === 'pa' ? '<div class="sc-note">Cálculo aprox. scraper VB18</div>' :
-        box(tag(id, 'FT'), fmt(v.q, 1), 'm³/h', id === 'ph' && Math.abs(v.q - s.globalFlowSetpoint) > 40 ? 'hi' : '') + box('SP', fmt(id === 'ph' ? s.globalFlowSetpoint : 850, 0), 'm³/h', 'sp'));
-      h += row('Caudal inyec. m³/h', (id, v) => id === 'lc' ? box('UG_FR_' + (TAGN.ug + 3), fmt(sim.stationInjectionTotal(sim.stationById('ug')), 1), 'm³/h') : id === 'pa' ? '' : box(tag(id, 'FT', 2), fmt(v.inj, 1), 'm³/h'));
+        box(tag(id, 'FT'), fmt(v.q, 1), 'm³/h', id === 'ph' && Math.abs(v.q - s.globalFlowSetpoint) > 40 ? 'hi' : '') + box('SP', fmt(id === 'ph' ? s.globalFlowSetpoint : CUST ? (v.st.qMaxM3h || 850) : 850, 0), 'm³/h', 'sp'));
+      h += row('Caudal inyec. m³/h', (id, v) => id === 'lc' && !CUST ? box('UG_FR_' + (TAGN.ug + 3), fmt(sim.stationInjectionTotal(sim.stationById('ug')), 1), 'm³/h') : id === 'pa' ? '' : box(tag(id, 'FT', 2), fmt(v.inj, 1), 'm³/h'));
       h += row('Presión aspirac. kg/cm²', (id, v) => id === 'pa' ? box('VB18_PTUP', fmt(v.pin), 'kg/cm²') :
         box(tag(id, 'PT', 4), fmt(v.pin), 'kg/cm²', v.st.pAspSpKgCm2 != null && v.pin < v.st.pAspSpKgCm2 - 1 ? 'bad' : '') + (v.st.pAspSpKgCm2 != null ? box('SP', fmt(v.st.pAspSpKgCm2), 'kg/cm²', 'sp') : ''));
-      h += row('Presión descarga kg/cm²', (id, v) => id === 'pa' ? box('VB18_PTDN', fmt(v.pout), 'kg/cm²') : id === 'lc' ? box('LC_PT_1203', fmt(Math.max(0, v.pin - 2.3)), 'kg/cm²') + box('SP', '11.0', 'kg/cm²', 'sp') :
+      h += row('Presión descarga kg/cm²', (id, v) => id === 'pa' ? box('VB18_PTDN', fmt(v.pout), 'kg/cm²') : id === 'lc' ? box(CUST ? `${TN}_PT_${TAGN.lc + 3}` : 'LC_PT_1203', fmt(Math.max(0, v.pin - 2.3)), 'kg/cm²') + box('SP', CUST ? fmt(META.opMaxKgCm2 ? Math.max(3, (sim.state.thresholds.lcArrivalTargetKgCm2 || 8) - 2) : 6) : '11.0', 'kg/cm²', 'sp') :
         box(tag(id, 'PT', 6), fmt(v.pout), 'kg/cm²') + (v.st.pDescSpKgCm2 != null ? box('SP', fmt(v.st.pDescSpKgCm2), 'kg/cm²', 'sp') : ''));
       h += row('Lazo PID', (id, v) => {
         if (id === 'pa') return box('VB18_SALIDA', '100.0', '%');
         const auto = !v.failed;
         const cvv = id === 'lc' ? 100 : v.cv;
-        return `<div class="sc-pid">${box(id === 'lc' ? 'PCV_1201_CV' : 'ASC_' + (TAGN[id] + 2) + '_CV', fmt(cvv, 1), '%')}<span class="sc-faceplate"><i></i><i></i><i></i><em class="${auto ? 'auto' : 'man'}">${auto ? 'AUTO' : 'MAN'}</em></span></div>`;
+        return `<div class="sc-pid">${box(id === 'lc' ? (CUST ? `PCV_${TAGN.lc + 1}_CV` : 'PCV_1201_CV') : 'ASC_' + (TAGN[id] + 2) + '_CV', fmt(cvv, 1), '%')}<span class="sc-faceplate"><i></i><i></i><i></i><em class="${auto ? 'auto' : 'man'}">${auto ? 'AUTO' : 'MAN'}</em></span></div>`;
       });
       h += row('Presión ducto kg/cm²', (id, v) => box('ENTRADA', fmt(v.pin), 'kg/cm²') + box('SALIDA', fmt(id === 'lc' ? Math.max(0, v.pin - 2.3) : Math.max(0, v.pout - 0.3)), 'kg/cm²'));
       h += row('Bombas', (id, v) => {
         const ps = (v.st.pumps || []);
-        if (!ps.length) return `<div class="sc-note">${id === 'lc' ? 'Terminal de recibo · PCV-1201' : 'Sin bombeo'}</div>`;
+        if (!ps.length) return `<div class="sc-note">${id === 'lc' ? 'Terminal de recibo · PCV-' + (TAGN.lc + 1) : v.st.type === 'regulating' ? 'Reductora · SP ' + fmt(v.st.pDescSpKgCm2) + ' kg/cm²' : 'Sin bombeo'}</div>`;
         return '<div class="sc-pumps">' + ps.map((p) => {
           const b = (p.role || '').includes('booster');
           const k = pumpState(id, p, v.failed, v.cv);
@@ -237,19 +291,19 @@
       g += `<g class="pid-filter ${ev.filter[id] ? 'bad' : ''}"><rect x="238" y="${yM - 86}" width="40" height="32" rx="4"/><text x="258" y="${yM - 66}" text-anchor="middle">F-A</text><rect x="238" y="${yM + 54}" width="40" height="32" rx="4"/><text x="258" y="${yM + 74}" text-anchor="middle">F-B</text></g>`;
       g += `<text x="258" y="${yM - 96}" text-anchor="middle" class="pid-lab ${ev.filter[id] ? 'bad' : ''}">ΔP ${fmt(dpf, 2)} kg/cm²</text>`;
       // inyección / tanque
-      if (v.inj > 0.1 || ['ph', 'cd', 'ug', 'mg', 'sos', 'ac'].includes(id)) {
+      if (v.inj > 0.1 || (CUST ? (st.injections || []).length > 0 : ['ph', 'cd', 'ug', 'mg', 'sos', 'ac'].includes(id))) {
         g += `<line x1="335" y1="60" x2="335" y2="${yM - 4}" class="pid-pipe thin" marker-end="url(#pid-ar)"/><text x="345" y="72" class="pid-lab">Inyección ${fmt(v.inj, 1)} m³/h</text>`;
       }
-      if (id === 'ph' || id === 'cd' || id === 'lc') {
+      if (CUST ? !!st.tankBuffer || id === 'lc' : id === 'ph' || id === 'cd' || id === 'lc') {
         const lvl = id === 'cd' && s.phFailed ? Math.max(0.05, s.cdAutonomyRemainH / Math.max(0.1, s.cdAutonomyTotalH)) : 0.62;
-        g += `<g transform="translate(60 40)"><rect width="90" height="120" rx="8" class="pid-tank"/><rect y="${120 - 120 * lvl}" width="90" height="${120 * lvl}" rx="6" class="pid-tank-l"/><text x="45" y="-8" text-anchor="middle" class="pid-lab">${id === 'ph' ? 'TK-578' : id === 'cd' ? 'TK CD (cabecera)' : 'TK recibo'}</text><text x="45" y="66" text-anchor="middle" class="pid-val">${Math.round(lvl * 100)} %</text></g>`;
+        g += `<g transform="translate(60 40)"><rect width="90" height="120" rx="8" class="pid-tank"/><rect y="${120 - 120 * lvl}" width="90" height="${120 * lvl}" rx="6" class="pid-tank-l"/><text x="45" y="-8" text-anchor="middle" class="pid-lab">${CUST ? (st.tankBuffer ? st.tankBuffer.name : 'TK recibo') : id === 'ph' ? 'TK-578' : id === 'cd' ? 'TK CD (cabecera)' : 'TK recibo'}</text><text x="45" y="66" text-anchor="middle" class="pid-val">${Math.round(lvl * 100)} %</text></g>`;
       }
       // skid de medición
       const mx = 430;
       g += `<line x1="360" y1="${yM}" x2="${mx + 220}" y2="${yM}" class="pid-pipe"/>`;
       g += `<rect x="${mx - 20}" y="${yM - 120}" width="260" height="240" rx="8" class="pid-skid"/><text x="${mx - 10}" y="${yM - 102}" class="pid-lab">Skid de medición</text>`;
       if (ms) ms.forEach((m, k) => {
-        const y = yM - 70 + k * 62;
+        const y = yM - 70 + k * Math.min(62, 186 / Math.max(3, ms.length));
         g += `<path d="M${mx} ${yM} V${y} H${mx + 200} V${yM}" class="pid-pipe thin"/>`;
         g += `<g class="pid-meter ${meterAlarm(id).warn && k > 0 ? 'warn' : ''}" data-meter="${id}:${k}"><rect x="${mx + 40}" y="${y - 16}" width="120" height="32" rx="4"/><text x="${mx + 100}" y="${y - 2}" text-anchor="middle" class="pid-tag">${m.type === 'PD' ? 'PD' : 'USM-' + m.id.slice(-1)} · MF ${m.mf.toFixed(4)}</text><text x="${mx + 100}" y="${y + 12}" text-anchor="middle" class="pid-val">${fmt(qInd(m), 1)} m³/h</text></g>`;
       });
@@ -273,13 +327,13 @@
         });
         g += `<line x1="${px + 90}" y1="${yM}" x2="${px + 170}" y2="${yM}" class="pid-pipe"/>`;
       } else {
-        g += `<line x1="${mx + 220}" y1="${yM}" x2="${px + 170}" y2="${yM}" class="pid-pipe"/><text x="${px}" y="${yM - 18}" class="pid-lab">${id === 'lc' ? 'Hacia tanques de recibo' : 'Sin bombeo'}</text>`;
+        g += `<line x1="${mx + 220}" y1="${yM}" x2="${px + 170}" y2="${yM}" class="pid-pipe"/><text x="${px}" y="${yM - 18}" class="pid-lab">${id === 'lc' ? 'Hacia tanques de recibo' : st.type === 'regulating' ? 'Reductora de presión' : 'Sin bombeo'}</text>`;
       }
       // válvula de control + DRA + salida
       const cx = px + 200;
-      g += `<g class="pid-cv" transform="translate(${cx} ${yM})"><path d="M-12 -9 L12 9 L12 -9 L-12 9 Z"/><path d="M0 0 V-24 M-10 -24 H10"/><text y="-32" text-anchor="middle" class="pid-tag">${id === 'lc' ? 'PCV-1201' : 'ASC-' + (TAGN[id] + 2)}</text><text y="34" text-anchor="middle" class="pid-val">CV ${fmt(id === 'lc' ? 100 : v.cv, 1)} %</text></g>`;
+      g += `<g class="pid-cv" transform="translate(${cx} ${yM})"><path d="M-12 -9 L12 9 L12 -9 L-12 9 Z"/><path d="M0 0 V-24 M-10 -24 H10"/><text y="-32" text-anchor="middle" class="pid-tag">${id === 'lc' ? 'PCV-' + (CUST ? TAGN.lc + 1 : 1201) : (st.type === 'regulating' ? 'PCV-' : 'ASC-') + (TAGN[id] + 2)}</text><text y="34" text-anchor="middle" class="pid-val">CV ${fmt(id === 'lc' ? 100 : v.cv, 1)} %</text></g>`;
       g += `<line x1="${cx + 12}" y1="${yM}" x2="${W - 40}" y2="${yM}" class="pid-pipe" marker-end="url(#pid-ar)"/><text x="${W - 150}" y="${yM - 18}" class="pid-lab">Ducto salida</text>`;
-      g += val(cx + 120, yM + 52, id === 'lc' ? 'LC_PT_1203' : tag(id, 'PT', 6), fmt(id === 'lc' ? Math.max(0, v.pin - 2.3) : v.pout), 'kg/cm²');
+      g += val(cx + 120, yM + 52, id === 'lc' ? (CUST ? `${TN}_PT_${TAGN.lc + 3}` : 'LC_PT_1203') : tag(id, 'PT', 6), fmt(id === 'lc' ? Math.max(0, v.pin - 2.3) : v.pout), 'kg/cm²');
       if (mains.length) g += `<g transform="translate(${cx + 90} ${yM - 80})"><rect x="-44" y="-16" width="88" height="34" rx="4" class="pid-dra ${sim.stationDraActive(st) ? 'on' : ''}"/><text y="-2" text-anchor="middle" class="pid-tag">DRA</text><text y="12" text-anchor="middle" class="pid-val">${sim.stationDraActive(st) ? fmt(sim.stationDraLph(st), 0) + ' L/h' : 'off'}</text></g><line x1="${cx + 90}" y1="${yM - 62}" x2="${cx + 90}" y2="${yM - 4}" class="pid-pipe thin dash"/>`;
       g += '</svg>';
 
@@ -288,10 +342,14 @@
       if (mains.length) {
         const spT = st.pDescSpTarget != null ? st.pDescSpTarget : st.pDescSpKgCm2;
         const draOn = sim.stationDraActive(st);
-        h += `<div class="pid-ctl"><div class="pid-ctl-g"><b>Lazo PID de descarga</b><span>PV ${fmt(id === 'ph' ? v.pout : v.pout)} kg/cm² · SP ${fmt(st.pDescSpKgCm2)}${st.pDescSpTarget != null ? ' → ' + fmt(st.pDescSpTarget) + ' (rampa 3 kg/cm²/min)' : ''}</span><label>Nuevo SP <input type="number" id="pid-sp" min="5" max="90" step="0.5" value="${fmt(spT)}"> kg/cm²</label><button type="button" class="sc-btn exec" data-pidapply="sp">Aplicar SP</button></div>`;
+        h += `<div class="pid-ctl"><div class="pid-ctl-g"><b>Lazo PID de descarga</b><span>PV ${fmt(id === 'ph' ? v.pout : v.pout)} kg/cm² · SP ${fmt(st.pDescSpKgCm2)}${st.pDescSpTarget != null ? ' → ' + fmt(st.pDescSpTarget) + ' (rampa 3 kg/cm²/min)' : ''}</span><label>Nuevo SP <input type="number" id="pid-sp" min="5" max="${MAOP}" step="0.5" value="${fmt(spT)}"> kg/cm²</label><button type="button" class="sc-btn exec" data-pidapply="sp">Aplicar SP</button></div>`;
         h += `<div class="pid-ctl-g"><b>DRA (reductor de fricción)</b><span>${draOn ? fmt(sim.stationDraLph(st), 0) + ' L/h · menos fricción aguas abajo' : 'apagado'}</span><label><input type="checkbox" id="pid-dra" ${draOn ? 'checked' : ''}> Inyectar</label><label>Dosis <input type="number" id="pid-lph" min="0" max="10" step="1" value="${fmt(sim.stationDraLph(st), 0)}"> L/h</label><button type="button" class="sc-btn exec" data-pidapply="dra">Aplicar DRA</button></div>`;
-        if (id === 'ph') h += `<div class="pid-ctl-g"><b>Caudal de cabecera</b><span>${fmt(S().segmentFlows.ph, 0)} m³/h · SP ${fmt(S().flowTarget != null ? S().flowTarget : S().globalFlowSetpoint, 0)}${S().flowTarget != null ? ' (en rampa)' : ''} · máx. 750</span><label>Nuevo SP <input type="number" id="pid-q" min="0" max="750" step="10" value="${fmt(S().flowTarget != null ? S().flowTarget : S().globalFlowSetpoint, 0)}"> m³/h</label><button type="button" class="sc-btn exec" data-pidapply="q">Aplicar en rampa</button></div>`;
-        h += `<p class="pid-ctl-note">Más caudal o menos DRA exigen más presión. Con el SP del PID limitás la presión sin tocar el caudal; si no alcanza, subí el DRA. Máximo del ducto: 90 kg/cm²; operación normal hasta 80.</p></div>`;
+        if (id === 'ph') h += `<div class="pid-ctl-g"><b>Caudal de cabecera</b><span>${fmt(S().segmentFlows.ph, 0)} m³/h · SP ${fmt(S().flowTarget != null ? S().flowTarget : S().globalFlowSetpoint, 0)}${S().flowTarget != null ? ' (en rampa)' : ''} · máx. ${QMAX}</span><label>Nuevo SP <input type="number" id="pid-q" min="0" max="${QMAX}" step="10" value="${fmt(S().flowTarget != null ? S().flowTarget : S().globalFlowSetpoint, 0)}"> m³/h</label><button type="button" class="sc-btn exec" data-pidapply="q">Aplicar en rampa</button></div>`;
+        h += `<p class="pid-ctl-note">Más caudal o menos DRA exigen más presión. Con el SP del PID limitás la presión sin tocar el caudal; si no alcanza, subí el DRA. Máximo del ducto: ${MAOP} kg/cm²; operación normal hasta ${OPMAX}.</p></div>`;
+      }
+      if (!mains.length && st.type === 'regulating') {
+        const spT = st.pDescSpTarget != null ? st.pDescSpTarget : st.pDescSpKgCm2;
+        h += `<div class="pid-ctl"><div class="pid-ctl-g"><b>Reductora · SP de presión aguas abajo</b><span>Entrada ${fmt(v.pin)} → salida ${fmt(v.pout)} kg/cm² · SP ${fmt(st.pDescSpKgCm2)}</span><label>Nuevo SP <input type="number" id="pid-sp" min="1" max="${MAOP}" step="0.5" value="${fmt(spT)}"> kg/cm²</label><button type="button" class="sc-btn exec" data-pidapply="sp">Aplicar SP</button></div><p class="pid-ctl-note">La reductora protege el tramo en bajada: limita la presión de salida sin bombear.</p></div>`;
       }
       if (pending) h += `<div class="pid-confirm">Confirmar: <b>${esc(pending.label)}</b> <button type="button" class="sc-btn exec" data-exec="1">Ejecutar</button> <button type="button" class="sc-btn" data-cancel="1">Cancelar</button></div>`;
       else h += `<div class="pid-help">Tocá una bomba para arrancarla o pararla (confirmación en dos pasos). Tocá un medidor para calibrarlo con el prover.</div>`;
@@ -306,7 +364,7 @@
         const ma = meterAlarm(id);
         meters[id].forEach((m, k) => {
           const d = devPct(m);
-          h += `<tr class="${k === 0 ? 'first' : ''} ${proving && proving.id === id && proving.k === k ? 'sel' : ''}">${k === 0 ? `<td rowspan="3" class="me-st">${sim.stationById(id).shortName}${ma.warn ? '<span class="me-warn">Aviso calib.</span>' : ''}<em>USM A–B ${fmt(ma.ab, 3)} %</em></td>` : ''}<td class="mono">${m.id}${m.duty ? ' <i>duty</i>' : ''}</td><td>${m.type}</td><td class="r mono">${fmt(qInd(m), 1)}</td><td class="r mono">${m.mf.toFixed(5)}</td><td class="r mono ${Math.abs(d) > 0.15 ? 'bad' : ''}">${d >= 0 ? '+' : ''}${fmt(d, 3)} %</td><td class="me-last">${esc(m.last.when)} · rep. ${fmt(m.last.rep, 3)} %</td><td><button type="button" class="sc-btn" data-prove="${id}:${k}" ${proving && proving.state === 'running' ? 'disabled' : ''}>Calibrar</button></td></tr>`;
+          h += `<tr class="${k === 0 ? 'first' : ''} ${proving && proving.id === id && proving.k === k ? 'sel' : ''}">${k === 0 ? `<td rowspan="${meters[id].length}" class="me-st">${sim.stationById(id).shortName}${ma.warn ? '<span class="me-warn">Aviso calib.</span>' : ''}<em>USM A–B ${fmt(ma.ab, 3)} %</em></td>` : ''}<td class="mono">${m.id}${m.duty ? ' <i>duty</i>' : ''}</td><td>${m.type}</td><td class="r mono">${fmt(qInd(m), 1)}</td><td class="r mono">${m.mf.toFixed(5)}</td><td class="r mono ${Math.abs(d) > 0.15 ? 'bad' : ''}">${d >= 0 ? '+' : ''}${fmt(d, 3)} %</td><td class="me-last">${esc(m.last.when)} · rep. ${fmt(m.last.rep, 3)} %</td><td><button type="button" class="sc-btn" data-prove="${id}:${k}" ${proving && proving.state === 'running' ? 'disabled' : ''}>Calibrar</button></td></tr>`;
         });
       }
       h += `</tbody></table></div></div><div class="me-right" id="me-prover">${proverPanel()}</div></div>`;
@@ -370,12 +428,14 @@
     function renderProver() { const el = $('me-prover'); if (el) el.innerHTML = proverPanel(); }
     function balancePanel() {
       const s = S();
-      const inQ = qInd(meters.ph[0]) + ['ac', 'cd', 'mg', 'sos', 'ug'].reduce((a, id) => a + sim.stationInjectionTotal(sim.stationById(id)), 0);
-      const outQ = qInd(meters.lc[0]);
+      const inQ = CUST
+        ? (meters.ph ? qInd(meters.ph[0]) : trueQ('ph')) + SORTED.filter((x) => x.id !== 'ph').reduce((a, x) => a + sim.stationInjectionTotal(x), 0)
+        : qInd(meters.ph[0]) + ['ac', 'cd', 'mg', 'sos', 'ug'].reduce((a, id) => a + sim.stationInjectionTotal(sim.stationById(id)), 0);
+      const outQ = meters.lc ? qInd(meters.lc[0]) : trueQ('lc');
       const day = 24;
       const imb = (outQ - inQ) * day;
       const pct = inQ > 0 ? (outQ - inQ) / inQ * 100 : 0;
-      return `<div class="me-bal"><h3 class="sc-h3">Balance de línea · ingresos (PH + inyecciones) contra recibo en LC</h3><div class="me-bal-grid"><div><span>Ingresos</span><b>${fmt(inQ, 1)} m³/h</b></div><div><span>Recibo LC</span><b>${fmt(outQ, 1)} m³/h</b></div><div class="${Math.abs(pct) > 0.089 ? 'bad' : ''}"><span>Desbalance</span><b>${pct >= 0 ? '+' : ''}${fmt(pct, 3)} %</b></div><div><span>Proyección diaria</span><b>${imb >= 0 ? '+' : ''}${fmt(imb, 0)} m³/d</b></div><div><span>Tolerancia mensual</span><b>± 0,089 %</b></div><div><span>Tolerancia anual</span><b>± 0,026 %</b></div></div><p class="me-note">El desbalance mezcla error de medición y variación de linepack. Si crece de golpe y la presión cae, puede ser una fuga; si crece lento, calibrá los medidores de PH y LC.</p></div>`;
+      return `<div class="me-bal"><h3 class="sc-h3">Balance de línea · ingresos (${HN} + inyecciones) contra recibo en ${TN}</h3><div class="me-bal-grid"><div><span>Ingresos</span><b>${fmt(inQ, 1)} m³/h</b></div><div><span>Recibo ${TN}</span><b>${fmt(outQ, 1)} m³/h</b></div><div class="${Math.abs(pct) > 0.089 ? 'bad' : ''}"><span>Desbalance</span><b>${pct >= 0 ? '+' : ''}${fmt(pct, 3)} %</b></div><div><span>Proyección diaria</span><b>${imb >= 0 ? '+' : ''}${fmt(imb, 0)} m³/d</b></div><div><span>Tolerancia mensual</span><b>± 0,089 %</b></div><div><span>Tolerancia anual</span><b>± 0,026 %</b></div></div><p class="me-note">El desbalance mezcla error de medición y variación de linepack. Si crece de golpe y la presión cae, puede ser una fuga; si crece lento, calibrá los medidores de PH y LC.</p></div>`;
     }
 
     // ---- eventos ----
@@ -387,7 +447,7 @@
       if (s.phFailed) {
         const rem = Math.max(0, s.cdAutonomyRemainH);
         const pct = rem / Math.max(0.1, s.cdAutonomyTotalH) * 100;
-        h += `<div class="ev-cd ${s.cdTempHead ? '' : 'out'}"><div><span class="ev-eyebrow">Cerro Divisadero como cabecera</span><b>${s.cdTempHead ? `Autonomía ${Math.floor(rem)}:${String(Math.round((rem % 1) * 60)).padStart(2, '0')} h` : 'Autonomía agotada · línea detenida'}</b></div><div class="ev-bar"><i style="width:${pct.toFixed(1)}%"></i></div><p>Caudal hacia LC: ${fmt(s.segmentFlows.lc, 0)} m³/h. Reponé PH antes de que se vacíe el tanque de CD.</p></div>`;
+        h += `<div class="ev-cd ${s.cdTempHead ? '' : 'out'}"><div><span class="ev-eyebrow">${CUST ? ((sim.stationById('cd') || {}).name || 'Cabecera alternativa') : 'Cerro Divisadero'} como cabecera</span><b>${s.cdTempHead ? `Autonomía ${Math.floor(rem)}:${String(Math.round((rem % 1) * 60)).padStart(2, '0')} h` : 'Autonomía agotada · línea detenida'}</b></div><div class="ev-bar"><i style="width:${pct.toFixed(1)}%"></i></div><p>Caudal hacia LC: ${fmt(s.segmentFlows.lc, 0)} m³/h. Reponé PH antes de que se vacíe el tanque de CD.</p></div>`;
       }
       // rearmes pendientes
       const pend = Object.keys(ev.elec);
@@ -400,8 +460,8 @@
         }).join('') + '</div>';
       }
       const extra = [];
-      if (ev.filter.ac) extra.push('<button type="button" class="sc-btn" data-fix="filtro">Cambiar a filtro B en AC</button>');
-      if (ev.n2.ph) extra.push('<button type="button" class="sc-btn" data-fix="n2">Reponer N2 en PH</button>');
+      for (const fid in ev.filter) extra.push(`<button type="button" class="sc-btn" data-fix="filtro" data-fid="${fid}">Cambiar a filtro B en ${sim.stationById(fid).shortName}</button>`);
+      if (ev.n2.ph) extra.push(`<button type="button" class="sc-btn" data-fix="n2">Reponer N2 en ${HN}</button>`);
       if (s.scenarioActive) extra.push('<button type="button" class="sc-btn" data-fix="clear">Normalizar escenario</button>');
       if (extra.length) h += `<div class="me-btns">${extra.join('')}</div>`;
       // estrategia global
@@ -459,9 +519,9 @@
       const pa = e.target.closest('[data-pidapply]');
       if (pa) {
         const k = pa.dataset.pidapply;
-        if (k === 'sp') { const v2 = Number($('pid-sp').value); if (isFinite(v2)) { sim.setStationPidSp(stSel, v2); app.toast(`SP del PID ${sim.stationById(stSel).shortName} → ${Math.min(90, v2)} kg/cm² en rampa`); } }
+        if (k === 'sp') { const v2 = Number($('pid-sp').value); if (isFinite(v2)) { sim.setStationPidSp(stSel, v2); app.toast(`SP del PID ${sim.stationById(stSel).shortName} → ${Math.min(MAOP, v2)} kg/cm² en rampa`); } }
         if (k === 'dra') { sim.setStationDraInject(stSel, $('pid-dra').checked); sim.setStationDraLph(stSel, Number($('pid-lph').value)); app.toast('DRA actualizado'); }
-        if (k === 'q') { const q = Number($('pid-q').value); if (isFinite(q)) { sim.rampFlowTo(q); app.toast(`Caudal PH → ${Math.min(750, q)} m³/h en rampa`); } }
+        if (k === 'q') { const q = Number($('pid-q').value); if (isFinite(q)) { sim.rampFlowTo(q); app.toast(`Caudal ${HN} → ${Math.min(QMAX, q)} m³/h en rampa`); } }
         render(true); return;
       }
       if (ext) { const tx = e.target.closest(ext.selector); if (tx && ext.click(tx)) { render(true); return; } }
@@ -493,8 +553,8 @@
       if (d.close) { proving = null; render(true); return; }
       if (d.ev) { const e2 = EVENTS.find((x) => x.k === d.ev); if (e2) { e2.run(); app.toast(e2.t); render(true); } return; }
       if (d.rearm) { rearm(d.rearm); render(true); return; }
-      if (d.fix === 'filtro') { delete ev.filter.ac; evLog('AC: cambio a filtro B, ΔP normal'); }
-      if (d.fix === 'n2') { delete ev.n2.ph; evLog('PH: presión de N2 repuesta'); }
+      if (d.fix === 'filtro') { const fid = d.fid || 'ac'; delete ev.filter[fid]; evLog(`${(sim.stationById(fid) || {}).shortName || fid}: cambio a filtro B, ΔP normal`); }
+      if (d.fix === 'n2') { delete ev.n2.ph; evLog(`${HN}: presión de N2 repuesta`); }
       if (d.fix === 'clear') { app.normalOps(); Object.keys(ev.elec).forEach((k) => delete ev.elec[k]); ev.esd = {}; evLog('Escenario normalizado'); }
       render(true);
     });

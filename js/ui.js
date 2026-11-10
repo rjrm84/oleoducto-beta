@@ -13,6 +13,7 @@
   function qsa(sel, root) { return Array.from((root || document).querySelectorAll(sel)); }
 
   async function loadConfig() {
+    if (window.CUSTOM_CONFIG) return JSON.parse(JSON.stringify(window.CUSTOM_CONFIG));
     if (typeof STATIONS_DATA !== 'undefined' && STATIONS_DATA) {
       try { return JSON.parse(JSON.stringify(STATIONS_DATA)); } catch (e) { /* fall */ }
     }
