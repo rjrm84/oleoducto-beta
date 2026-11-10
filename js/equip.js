@@ -54,6 +54,7 @@
       for (const p of mains) {
         E[id].pumps[p.id] = {
           oilP: p.online ? 2.2 : 1.6, oilT: 42, level: 82 + Math.random() * 10, lubeFault: false, aux: 'A',
+          mov: { pos: p.online ? 1 : 0, target: p.online ? 1 : 0 }, prevOn: !!p.online, manualStart: false, deadT: 0, sealLeak: false,
           brg: { pDE: 40, pNDE: 38, mDE: 42, mNDE: 40 }, vib: 2, heat: 0, vibFault: 0,
           vfdFault: false, kw: 0, amp: 0, r: 0, head: 0, hours: 12000 + Math.round(Math.random() * 30000),
         };
@@ -152,6 +153,15 @@
           else if (on && k.vib >= LIM.vibTrip) trip = `alta vibración (${fmt(k.vib, 1)} mm/s)`;
           else if (on && p.drive === 'variador' && (k.vfdFault || e.vfdRoom >= 40)) trip = k.vfdFault ? 'falla de variador' : 'alta temperatura en sala de variadores';
           if (trip) { sim.setPump(id, p.id, false); ctx.evLog(`${sn(id)}: disparo de ${p.name} por ${trip}`); }
+          // válvula de descarga actuada (MOV): carrera completa en ~1 min
+          const mv = k.mov;
+          if (on && !k.prevOn) { if (!k.manualStart) mv.target = 1; k.manualStart = false; }
+          if (!on && k.prevOn && mv.pos > 0.05) ctx.evLog(`${sn(id)}: ${p.name} parada con la válvula de descarga abierta · cerrar MOV`);
+          k.prevOn = on;
+          const stepMv = dtH / 0.0167;
+          mv.pos = mv.target > mv.pos ? Math.min(mv.target, mv.pos + stepMv) : Math.max(mv.target, mv.pos - stepMv);
+          p.powerFraction = on ? Math.max(0, Math.min(1, mv.pos)) : 1;
+          if (on && mv.pos < 0.1 && Q > 0) { k.deadT += dtH; if (k.deadT > 0.05) k.heat = Math.max(k.heat, 0.5); } else k.deadT = 0;
           // variador
           k.hz = on && p.drive === 'variador' ? Math.min(50, 38 + 12 * Math.min(1, load)) : 0;
           k.rpm = on ? (p.drive === 'variador' ? k.hz * 59.6 : p.drive === 'turbina' ? 4300 + 500 * Math.min(1, load) : 2980) : 0;
@@ -160,7 +170,8 @@
         const pig = s.pig || {};
         if (x.pigTrap) {
           const tr = e.trap;
-          if (pig.active && pig.fromId === id && pig.launchedAt != null && tr.lastLaunch !== pig.launchedAt && (pig.pkKm || 0) > (x.pkKm || 0) + 0.05) {
+          if (tr.sensorFault) { if (pig.active && pig.fromId === id) tr.lastLaunch = pig.launchedAt; if (pig.status === 'received' && pig.atId === id) tr.waiting = false; }
+          else if (pig.active && pig.fromId === id && pig.launchedAt != null && tr.lastLaunch !== pig.launchedAt && (pig.pkKm || 0) > (x.pkKm || 0) + 0.05) {
             tr.lastLaunch = pig.launchedAt;
             tr.xsOut = { t: hhmm(), on: true, tMs: Date.now() };
             tr.log.unshift(`${hhmm()} · XS salida: pasó el pig ${pig.typeName || ''}`);
@@ -188,6 +199,7 @@
         if (e.dp >= LIM.filtAlm) out.push({ id: `eq-filt-${id}`, severity: 'critical', text: `${tg}: filtro de entrada ocluido · ΔP ${fmt(e.dp, 2)} kg/cm²`, tag: tg });
         else if (e.dp >= LIM.filtWarn) out.push({ id: `eq-filtw-${id}`, severity: 'warn', text: `${tg}: alta ΔP de filtro ${fmt(e.dp, 2)} kg/cm²`, tag: tg });
         if (e.elec.vIn < LIM.vInLow && PUMP_ST.includes(id) && !hasTurbineOnly(x)) out.push({ id: `eq-mt-${id}`, severity: e.elec.vIn < 5 ? 'critical' : 'warn', text: `${tg}: baja tensión de entrada ${fmt(e.elec.vIn, 1)} kV`, tag: tg });
+        if (e.trap.sensorFault) out.push({ id: `eq-xs-${id}`, severity: 'warn', text: `${tg}: falla del sensor de paso de scraper`, tag: tg });
         if (e.vfdRoom >= 32) out.push({ id: `eq-vfdr-${id}`, severity: e.vfdRoom >= 37 ? 'critical' : 'warn', text: `${tg}: alta temperatura en sala de variadores ${fmt(e.vfdRoom, 1)} °C`, tag: tg });
         for (const p of (x.pumps || []).filter((q) => !isBooster(q))) {
           const k = e.pumps[p.id];
@@ -197,6 +209,9 @@
           if (tmax >= LIM.brgWarn) out.push({ id: `eq-brg-${p.id}`, severity: 'warn', text: `${tg}: ${p.name} alta temperatura de cojinete ${fmt(tmax, 0)} °C`, tag: tg });
           if (on && k.vib >= LIM.vibWarn) out.push({ id: `eq-vib-${p.id}`, severity: 'warn', text: `${tg}: ${p.name} alta vibración ${fmt(k.vib, 1)} mm/s`, tag: tg });
           if (k.oilP < LIM.oilLow) out.push({ id: `eq-oil-${p.id}`, severity: on ? 'critical' : 'warn', text: `${tg}: ${p.name} baja presión de aceite ${fmt(k.oilP, 2)} bar`, tag: tg });
+          if (!on && k.mov.pos > 0.05) out.push({ id: `eq-movo-${p.id}`, severity: 'warn', text: `${tg}: ${p.name} parada con válvula de descarga abierta (${fmt(k.mov.pos * 100, 0)} %)`, tag: tg });
+          if (on && k.mov.pos < 0.1 && k.deadT > 0.02) out.push({ id: `eq-dead-${p.id}`, severity: 'critical', text: `${tg}: ${p.name} en marcha con la descarga cerrada`, tag: tg });
+          if (k.sealLeak) out.push({ id: `eq-seal-${p.id}`, severity: 'critical', text: `${tg}: pérdida por sello mecánico en ${p.name}`, tag: tg });
           if (k.vfdFault) out.push({ id: `eq-vfd-${p.id}`, severity: 'critical', text: `${tg}: falla de variador de ${p.name}`, tag: tg });
           if (on && (k.offT || 0) > 0.1) out.push({ id: `eq-curve-${p.id}`, severity: 'warn', text: `${tg}: ${p.name} fuera de curva (${fmt(k.r * 100, 0)} % del BEP)`, tag: tg });
         }
@@ -283,14 +298,16 @@
       if (!mains.length) return '';
       if (!pumpSel || !mains.some((p) => p.id === pumpSel)) pumpSel = (mains.find((p) => p.online) || mains[0]).id;
       const t = (v, w, a) => `<td class="r mono ${v >= a ? 'bad' : v >= w ? 'warn' : ''}">${fmt(v, 0)}</td>`;
-      let h = `<div class="eq-card eq-wide"><h3 class="sc-h3">Bombas principales · lubricación, cojinetes y vibración <span>tocá una fila para ver su curva</span></h3><div class="me-tablewrap"><table class="me-table"><thead><tr><th>Bomba</th><th>Estado</th><th class="r">Carga</th><th class="r">% BEP</th><th class="r">Coj. LA bomba °C</th><th class="r">Coj. LOA bomba °C</th><th class="r">Coj. LA motor °C</th><th class="r">Coj. LOA motor °C</th><th class="r">Vibración mm/s</th><th class="r">Aceite bar</th><th class="r">Aceite °C</th><th class="r">Nivel %</th><th class="r">Horas</th></tr></thead><tbody>`;
+      let h = `<div class="eq-card eq-wide"><h3 class="sc-h3">Bombas principales · lubricación, cojinetes y vibración <span>tocá una fila para ver su curva</span></h3><div class="me-tablewrap"><table class="me-table"><thead><tr><th>Bomba</th><th>Estado</th><th class="r">Carga</th><th class="r">% BEP</th><th class="r">Coj. LA bomba °C</th><th class="r">Coj. LOA bomba °C</th><th class="r">Coj. LA motor °C</th><th class="r">Coj. LOA motor °C</th><th class="r">Vibración mm/s</th><th class="r">Aceite bar</th><th class="r">Aceite °C</th><th class="r">Nivel %</th><th class="r">Descarga MOV</th><th class="r">Horas</th></tr></thead><tbody>`;
       for (const p of mains) {
         const k = e.pumps[p.id];
         const on = k.rpm > 0;
         const rc = !on ? '' : k.r < LIM.aorLo || k.r > LIM.aorHi ? 'bad' : k.r < LIM.porLo || k.r > LIM.porHi ? 'warn' : '';
-        h += `<tr class="${p.id === pumpSel ? 'sel' : ''}" data-eqpump="${p.id}" style="cursor:pointer"><td><b>${esc(p.name)}</b>${p.reserve ? ' <span class="me-last">reserva</span>' : ''}</td><td>${on ? 'En marcha' : 'Parada'}${k.lubeFault ? ' · <span class="me-warn">lubricación</span>' : ''}</td><td class="r mono">${on ? fmt(k.load * 100, 0) + ' %' : '—'}</td><td class="r mono ${rc}">${on ? fmt(k.r * 100, 0) : '—'}</td>${t(k.brg.pDE, LIM.brgWarn, LIM.brgTrip)}${t(k.brg.pNDE, LIM.brgWarn, LIM.brgTrip)}${t(k.brg.mDE, LIM.brgWarn, LIM.brgTrip)}${t(k.brg.mNDE, LIM.brgWarn, LIM.brgTrip)}<td class="r mono ${k.vib >= LIM.vibTrip ? 'bad' : k.vib >= LIM.vibWarn ? 'warn' : ''}">${fmt(k.vib, 1)}</td><td class="r mono ${k.oilP < LIM.oilTrip ? 'bad' : k.oilP < LIM.oilLow ? 'warn' : ''}">${fmt(k.oilP, 2)}</td><td class="r mono">${fmt(k.oilT, 0)}</td><td class="r mono">${fmt(k.level, 0)}</td><td class="r mono">${Math.round(k.hours).toLocaleString('es-AR')}</td></tr>`;
+        h += `<tr class="${p.id === pumpSel ? 'sel' : ''}" data-eqpump="${p.id}" style="cursor:pointer"><td><b>${esc(p.name)}</b>${p.reserve ? ' <span class="me-last">reserva</span>' : ''}</td><td>${on ? 'En marcha' : 'Parada'}${k.lubeFault ? ' · <span class="me-warn">lubricación</span>' : ''}</td><td class="r mono">${on ? fmt(k.load * 100, 0) + ' %' : '—'}</td><td class="r mono ${rc}">${on ? fmt(k.r * 100, 0) : '—'}</td>${t(k.brg.pDE, LIM.brgWarn, LIM.brgTrip)}${t(k.brg.pNDE, LIM.brgWarn, LIM.brgTrip)}${t(k.brg.mDE, LIM.brgWarn, LIM.brgTrip)}${t(k.brg.mNDE, LIM.brgWarn, LIM.brgTrip)}<td class="r mono ${k.vib >= LIM.vibTrip ? 'bad' : k.vib >= LIM.vibWarn ? 'warn' : ''}">${fmt(k.vib, 1)}</td><td class="r mono ${k.oilP < LIM.oilTrip ? 'bad' : k.oilP < LIM.oilLow ? 'warn' : ''}">${fmt(k.oilP, 2)}</td><td class="r mono">${fmt(k.oilT, 0)}</td><td class="r mono">${fmt(k.level, 0)}</td><td class="r"><button type="button" class="sc-btn" data-mov="${p.id}" data-open="${k.mov.target > 0.5 ? 0 : 1}">${k.mov.pos > 0.95 ? 'Abierta' : k.mov.pos < 0.05 ? 'Cerrada' : fmt(k.mov.pos * 100, 0) + ' %'} · ${k.mov.target > 0.5 ? 'cerrar' : 'abrir'}</button></td><td class="r mono">${Math.round(k.hours).toLocaleString('es-AR')}</td></tr>`;
       }
       h += `</tbody></table></div><p class="me-note">Alarma de cojinete ${LIM.brgWarn} °C y disparo ${LIM.brgTrip} °C · vibración ${LIM.vibWarn} / ${LIM.vibTrip} mm/s · aceite mínimo ${LIM.oilLow} bar, disparo ${LIM.oilTrip} bar. Con la bomba parada, la bomba auxiliar de la central mantiene la prelubricación.</p>`;
+      const perm = pumpPermissives(id, pumpSel);
+      h += `<div class="eq-perm"><b>Permisivos de arranque · ${esc(((x.pumps || []).find((q) => q.id === pumpSel) || {}).name || '')}</b>${perm.map(([t, ok]) => `<span class="${ok ? 'ok' : 'bad'}">${ok ? '✓' : '✗'} ${esc(t)}</span>`).join('')}</div>`;
       h += `<div class="eq-curvewrap">${curveSvg(id, pumpSel)}<div class="eq-curvetxt">${curveText(id, pumpSel)}<div class="me-btns"><button type="button" class="sc-btn" data-eq="lube">Falla de central de lubricación</button><button type="button" class="sc-btn" data-eq="heat">Calentamiento de cojinete</button><button type="button" class="sc-btn" data-eq="vib">Desbalanceo (vibración)</button><button type="button" class="sc-btn exec" data-eq="fix">Reparar y normalizar</button></div></div></div></div>`;
       return h;
     }
@@ -357,6 +374,7 @@
       const d = el.dataset;
       if (d.eqst) { sel = d.eqst; pumpSel = null; return true; }
       if (d.eqpump) { pumpSel = d.eqpump; return true; }
+      if (d.mov) { setMov(sel, d.mov, d.open === '1'); return true; }
       const e = E[sel];
       if (!d.eq || !e) return false;
       const x = st(sel);
@@ -383,11 +401,55 @@
     // falla de filtro desde Eventos y fallas
     function clog(id) { const e = E[id]; if (!e) return; const duty = e.filters.find((f) => f.mode === 'servicio'); if (duty) { duty.foul += 1.1; duty.fault = true; } }
     function unclog(id) { const e = E[id]; if (!e) return; e.filters.forEach((f) => { f.fault = false; if (f.mode === 'servicio') { f.mode = 'retrolavado'; f.cycle = 0.1; } else if (f.mode === 'reserva') f.mode = 'servicio'; }); }
+    // ---------- permisivos y válvulas de descarga ----------
+    function pumpPermissives(id, pid) {
+      const e = E[id], x = st(id), s = S();
+      const p = (x.pumps || []).find((q) => q.id === pid);
+      const k = e && e.pumps[pid];
+      if (!p || !k) return [];
+      const elc = ctx.ev && ctx.ev.elec ? ctx.ev.elec[id] : null;
+      const out = [];
+      if (p.drive !== 'turbina') out.push(['Tensión de barra 6 kV normal', e.elec.vBus > 5.4]);
+      out.push(['Estación rearmada (sin disparo ni paro de emergencia)', !(ctx.ev && ctx.ev.esd && ctx.ev.esd[id]) && !(elc && !elc.ready)]);
+      out.push(['Presión de aceite de lubricación ≥ 1,2 bar', k.oilP >= LIM.oilLow && !k.lubeFault]);
+      out.push(['Cojinetes y vibración sin disparo activo', !k.heat && !k.vibFault && Math.max(k.brg.pDE, k.brg.pNDE, k.brg.mDE, k.brg.mNDE) < LIM.brgWarn]);
+      out.push(['Válvula de descarga cerrada', k.mov.pos < 0.05]);
+      if (id !== 'ph') out.push(['Presión de aspiración sobre el mínimo', (s.pressuresIn[id] || 0) >= Math.max(1, (x.pAspMinKgCm2 || 3) - 1)]);
+      out.push(['Filtro de entrada sin oclusión', (e.dp || 0) < LIM.filtAlm]);
+      if (p.drive === 'variador') out.push(['Variador sin falla', !k.vfdFault && e.vfdRoom < 37]);
+      out.push(['Sello mecánico sin pérdida', !k.sealLeak]);
+      return out;
+    }
+    function stationPermissives(id) {
+      const e = E[id], x = st(id);
+      if (!e || !PUMP_ST.includes(id)) return [];
+      const elc = ctx.ev && ctx.ev.elec ? ctx.ev.elec[id] : null;
+      const mains = (x.pumps || []).filter((p) => !isBooster(p));
+      return [
+        ['Tensión de entrada 33 kV normalizada', hasTurbineOnly(x) || (e.elec.vIn >= LIM.vInLow && !(elc && !elc.ready))],
+        ['Pulsador de paro de emergencia repuesto', !(ctx.ev && ctx.ev.esd && ctx.ev.esd[id])],
+        ['Válvulas de descarga de las bombas cerradas', mains.every((p) => e.pumps[p.id].mov.pos < 0.05)],
+        ['Lubricación de las bombas en servicio', mains.every((p) => !e.pumps[p.id].lubeFault && e.pumps[p.id].oilP >= LIM.oilLow)],
+        ['Filtro de entrada disponible', (e.dp || 0) < LIM.filtAlm || e.filters.some((f) => f.mode === 'reserva')],
+        ['Sin pérdidas por sello', mains.every((p) => !e.pumps[p.id].sealLeak)],
+      ];
+    }
+    function setMov(id, pid, open) { const k = E[id] && E[id].pumps[pid]; if (!k) return; k.mov.target = open ? 1 : 0; const p = (st(id).pumps || []).find((q) => q.id === pid); ctx.evLog(`${sn(id)}: ${open ? 'abrir' : 'cerrar'} válvula de descarga de ${p ? p.name : pid}`); }
+    function closeAllMovs(id) { const e = E[id]; if (!e) return; Object.values(e.pumps).forEach((k) => { k.mov.target = 0; }); ctx.evLog(`${sn(id)}: cierre de todas las válvulas de descarga`); }
+    function markManualStart(id, pid) { const k = E[id] && E[id].pumps[pid]; if (k) k.manualStart = true; }
+    function movPos(id, pid) { const k = E[id] && E[id].pumps[pid]; return k ? k.mov.pos : null; }
+    function select(id) { if (EQ_ST.includes(id)) { sel = id; pumpSel = null; } }
+    function summary(id) {
+      const e = E[id];
+      if (!e || !PUMP_ST.includes(id)) return null;
+      const ks = Object.values(e.pumps);
+      return { dp: e.dp || 0, brg: Math.max(...ks.map((k) => Math.max(k.brg.pDE, k.brg.pNDE, k.brg.mDE, k.brg.mNDE))), oil: Math.min(...ks.map((k) => k.oilP)), vIn: e.elec.vIn, alarm: annunciators(id).some((a) => a[1]) };
+    }
     function reset() {
-      for (const id of EQ_ST) { const e = E[id]; e.hvacFail = false; e.elec.sag = 0; e.filters.forEach((f) => { f.fault = false; f.foul = Math.min(f.foul, 0.3); }); Object.values(e.pumps).forEach((k) => { k.lubeFault = false; k.heat = 0; k.vibFault = 0; k.vfdFault = false; }); }
+      for (const id of EQ_ST) { const e = E[id]; e.hvacFail = false; e.elec.sag = 0; e.filters.forEach((f) => { f.fault = false; f.foul = Math.min(f.foul, 0.3); }); Object.values(e.pumps).forEach((k) => { k.lubeFault = false; k.heat = 0; k.vibFault = 0; k.vfdFault = false; k.sealLeak = false; }); e.trap.sensorFault = false; }
     }
 
-    return { update, render, click, alarms, annunciators, clog, unclog, reset, state: E, selector: '[data-eqst],[data-eqpump],[data-eq]' };
+    return { update, render, click, alarms, annunciators, clog, unclog, reset, state: E, selector: '[data-eqst],[data-eqpump],[data-eq],[data-mov]', pumpPermissives, stationPermissives, setMov, closeAllMovs, markManualStart, movPos, select, summary, PUMP_ST, EQ_ST, TRAP_ST, LIM };
   }
 
   global.createEquip = createEquip;
