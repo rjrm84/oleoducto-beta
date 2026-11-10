@@ -22,8 +22,17 @@
       'Puesto Hernández': 'PH', 'Aguas del Carrizo': 'AC', 'Cerro Divisadero': 'CD', 'Malargüe': 'ML',
       'El Sosneado': 'ES', 'Pareditas': 'PA', 'Río Tunuyán': 'RT', 'Ugarteche': 'UG', 'Luján de Cuyo': 'LC',
     };
+    // v8: ductos a medida — nombres y siglas desde la configuración
+    if (sim.state.config._meta && sim.state.config._meta.custom) {
+      for (const k in NAMES) delete NAMES[k];
+      TAGS.length = 0;
+      for (const s of sim.state.stations) { NAMES[s.name] = s.shortName; TAGS.push(s.shortName); }
+    }
+    const sources = [];
+    function addSource(fn) { sources.push(fn); }
     function tagOf(text) {
       for (const n in NAMES) if (text.indexOf(n) >= 0) return NAMES[n];
+      for (const t of TAGS) if (new RegExp('(^|\\W)' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(\\W|$)').test(text)) return t;
       const m = text.match(/\b(PH|AC|CD|ML|ES|PA|RT|UG|LC)\b/);
       if (m) return m[1];
       if (/PK\s?\d+/.test(text)) return 'LÍNEA';
@@ -78,7 +87,8 @@
     }
 
     function update() {
-      const active = sim.state.alarms || [];
+      let active = sim.state.alarms || [];
+      for (const fn of sources) { try { active = active.concat(fn() || []); } catch (e) { /* fuente con error */ } }
       const seen = {};
       let newest = null;
       for (const a of active) {
@@ -87,7 +97,7 @@
         if (!al) {
           const text = clean(a.text);
           al = {
-            id: a.id, text, tag: tagOf(a.text), prio: prioOf(a.severity, a.text),
+            id: a.id, text, tag: a.tag || tagOf(a.text), prio: prioOf(a.severity, a.text),
             stamp: simStamp(), t: performance.now(), acked: false, active: true, shelved: false,
           };
           list.set(a.id, al);
@@ -137,7 +147,7 @@
     function reset() { list.clear(); }
     function on(fn) { listeners.push(fn); }
 
-    return { history: () => hist, update, sorted, ack, ackAll, newestUnacked, counts, enableSound, on, reset, get soundOn() { return soundOn; } };
+    return { addSource, history: () => hist, update, sorted, ack, ackAll, newestUnacked, counts, enableSound, on, reset, get soundOn() { return soundOn; } };
   }
 
   global.createAlarmManager = createAlarmManager;

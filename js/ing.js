@@ -98,7 +98,7 @@
       { g: 'Eléctricas', k: 'sub-cd', t: 'Falla de subestación en CD', d: 'Sin energía en Cerro Divisadero: las turbobombas paran y el crudo no pasa el peak de 1.985 m.', run: () => { tripStation('cd', 'Falla subestación'); evLog('Falla subestación CD'); } },
       { g: 'Eléctricas', k: 'sag-rt', t: 'Microcorte en Río Tunuyán', d: 'Disparo del variador de B-701B. Rearme rápido posible.', run: () => { tripStation('rt', 'Microcorte'); evLog('Microcorte RT · B-701B disparada'); } },
       { g: 'Cabecera', k: 'ph-cd', t: 'Falla PH · CD toma la cabecera (2 h)', d: 'PH sale de servicio. CD bombea desde su tanque como cabecera temporal durante unas 2 horas, con caudal reducido. Hay que reponer PH antes de que se agote la autonomía.', run: () => { sim.failStation('ph'); ev.elec.ph = { cause: 'Falla cabecera', tTrip: S().timeSec, ready: false }; evLog('Falla PH · CD cabecera temporal (autonomía 2 h)'); } },
-      { g: 'Mecánicas', k: 'filtro', t: 'Filtro tapado en AC', d: 'Sube la presión diferencial del filtro de entrada: cae la aspiración de las bombas.', run: () => { ev.filter.ac = 1.8; evLog('Alta presión diferencial filtro AC'); } },
+      { g: 'Mecánicas', k: 'filtro', t: 'Filtro tapado en AC', d: 'Sube la presión diferencial del filtro de entrada: cae la aspiración de las bombas.', run: () => { ev.filter.ac = 1.8; if (equip) equip.clog('ac'); evLog('Alta presión diferencial filtro AC'); } },
       { g: 'Mecánicas', k: 'bomba', t: 'Disparo de bomba en ES (vibración)', d: 'B-1101E sale por alta vibración. Hay que arrancar la reserva B-1101F desde el P&ID.', run: () => { sim.setPump('sos', 'sos-1101e', false); evLog('Disparo B-1101E por vibración'); } },
       { g: 'Mecánicas', k: 'n2', t: 'Baja presión de nitrógeno en PH', d: 'Alarma de baja presión de N2 en el tubo de sellos. Aviso sin disparo.', run: () => { ev.n2.ph = true; evLog('Baja presión N2 tubo · PH'); } },
       { g: 'Hidráulicas', k: 'fuga', t: 'Fuga o rotura en PK 212', d: 'Caída de presión y desbalance de volumen. Aislá con VB07 y VB08.', run: () => { S()._pendingRupturePk = 212; sim.applyScenario('fuga_rotura_pk'); evLog('Fuga/rotura PK 212'); } },
@@ -124,7 +124,7 @@
       const cd = sim.stationById('cd');
       out.push({ g: 'Cabecera', k: 'ph-cd', t: cd ? `Falla ${HN} · ${sn(cd)} toma la cabecera` : `Falla de la cabecera ${HN}`, d: cd ? `${HEAD.name} sale de servicio. ${cd.name} bombea desde su tanque como cabecera temporal, con caudal reducido.` : `${HEAD.name} sale de servicio y la línea se detiene. Hay que rearmar y volver a llenar en rampa.`, run: () => { sim.failStation('ph'); ev.elec.ph = { cause: 'Falla cabecera', tTrip: S().timeSec, ready: false }; evLog(`Falla ${HN}` + (cd ? ` · ${sn(cd)} cabecera temporal` : '')); } });
       const f = mids[0] || HEAD;
-      out.push({ g: 'Mecánicas', k: 'filtro', t: `Filtro tapado en ${sn(f)}`, d: 'Sube la presión diferencial del filtro de entrada: cae la aspiración de las bombas.', run: () => { ev.filter[f.id] = 1.8; evLog(`Alta presión diferencial filtro ${sn(f)}`); } });
+      out.push({ g: 'Mecánicas', k: 'filtro', t: `Filtro tapado en ${sn(f)}`, d: 'Sube la presión diferencial del filtro de entrada: cae la aspiración de las bombas.', run: () => { ev.filter[f.id] = 1.8; if (equip) equip.clog(f.id); evLog(`Alta presión diferencial filtro ${sn(f)}`); } });
       const pb = mids[mids.length - 1] || HEAD;
       const pOn = (pb.pumps || []).find((p) => p.online && !(p.role || '').includes('booster'));
       if (pOn) out.push({ g: 'Mecánicas', k: 'bomba', t: `Disparo de bomba en ${sn(pb)} (vibración)`, d: `${pOn.name} sale por alta vibración. Hay que arrancar la reserva desde el P&ID.`, run: () => { sim.setPump(pb.id, pOn.id, false); evLog(`Disparo ${pOn.name} por vibración`); } });
@@ -145,8 +145,8 @@
         const e = ev.elec[id];
         if (!e.ready && S().timeSec - e.tTrip > 600) { e.ready = true; evLog(`Tensión normalizada en ${sim.stationById(id).shortName}: listo para rearme`); }
       }
-      // filtro tapado: penaliza la aspiración de la estación
-      for (const fid in ev.filter) if (S().pressuresIn[fid] != null) S().pressuresIn[fid] = Math.max(0, S().pressuresIn[fid] - ev.filter[fid]);
+      // filtro tapado: lo modela el módulo de equipos (ΔP de los filtros autolimpiantes)
+      if (!equip) for (const fid in ev.filter) if (S().pressuresIn[fid] != null) S().pressuresIn[fid] = Math.max(0, S().pressuresIn[fid] - ev.filter[fid]);
     }
 
     // ---------------- valores por estación ----------------
@@ -188,18 +188,18 @@
         ['ALTA PRES. SALIDA DUCTO', v.pout != null && v.pout >= 0.9 * mo && (st.pumps || []).length > 0, 2],
         ['ALTA PRES. DESC. BBAS', st.pDescSpKgCm2 != null && v.pout >= st.pDescSpKgCm2 + 1, 2],
         ['BAJA PRES. ASP. BBAS', st.pAspSpKgCm2 != null && v.pin != null && v.pin < st.pAspSpKgCm2 - 1 && s.lineFlow > 50, 1],
-        ['ALTA PRES. DIF. FILTRO', !!ev.filter[id], 2],
+        ...(equip ? [] : [['ALTA PRES. DIF. FILTRO', !!ev.filter[id], 2]]),
         ['BAJA PRES. N2 TUBO', !!ev.n2[id], 3],
         ['FALLA SEC. SCRAPER', !!(s.pig && s.pig.stuck && id === 'ph'), 2],
         ['AVISO MEDIDORES (CALIB.)', ma.warn, 3],
         ['SUBESTACIÓN', !!(ev.elec[id] && /subestación/i.test(ev.elec[id].cause)), 1],
         ['DRA / POLÍMERO', !!(st.pumps && st.pumps.length && !sim.stationDraActive(st)), 3],
-      ];
+      ].concat(equip ? equip.annunciators(id) : []);
     }
 
     // ---------------- sub-vistas ----------------
     function nav() {
-      const items = [['principal', 'Principal'], ['estacion', 'Estación (P&ID)'], ['integridad', 'Integridad'], ['terminal', 'Terminal ' + TN], ['medicion', 'Medición'], ['cierres', 'Cierres OMNI'], ['custody', 'Custody'], ['alarmlog', 'Hist. alarmas'], ['eventos', 'Eventos y fallas']].concat(CUST ? [] : [['clasica', 'Consola clásica']]);
+      const items = [['principal', 'Principal'], ['estacion', 'Estación (P&ID)'], ['equipos', 'Equipos'], ['integridad', 'Integridad'], ['terminal', 'Terminal ' + TN], ['medicion', 'Medición'], ['cierres', 'Cierres OMNI'], ['custody', 'Custody'], ['alarmlog', 'Hist. alarmas'], ['eventos', 'Eventos y fallas']].concat(CUST ? [] : [['clasica', 'Consola clásica']]).filter(([k]) => k !== 'equipos' || equip);
       $('ing-nav').innerHTML = items.map(([k, t]) => `<button type="button" class="${k === sub ? 'on' : ''}" data-sub="${k}">${t}</button>`).join('');
     }
     function setSub(k) {
@@ -481,7 +481,7 @@
     function render(force) {
       if (sub === 'clasica') return;
       if (!force && (root.contains(document.activeElement) && document.activeElement.tagName === 'INPUT')) return;
-      const html = ext && ext.render[sub] ? ext.render[sub]() : sub === 'principal' ? principal() : sub === 'estacion' ? pid() : sub === 'medicion' ? medicion() : eventos();
+      const html = sub === 'equipos' && equip ? equip.render() : ext && ext.render[sub] ? ext.render[sub]() : sub === 'principal' ? principal() : sub === 'estacion' ? pid() : sub === 'medicion' ? medicion() : eventos();
       if (sub === 'medicion' && !force && proving) {
         // no pisar el panel del prover mientras corre
         const keep = $('me-prover');
@@ -524,6 +524,7 @@
         if (k === 'q') { const q = Number($('pid-q').value); if (isFinite(q)) { sim.rampFlowTo(q); app.toast(`Caudal ${HN} → ${Math.min(QMAX, q)} m³/h en rampa`); } }
         render(true); return;
       }
+      if (equip && sub === 'equipos') { const tq = e.target.closest(equip.selector); if (tq && equip.click(tq)) { render(true); return; } }
       if (ext) { const tx = e.target.closest(ext.selector); if (tx && ext.click(tx)) { render(true); return; } }
       const t = e.target.closest('[data-st],[data-pump],[data-meter],[data-exec],[data-cancel],[data-prove],[data-accept],[data-reprove],[data-close],[data-ev],[data-rearm],[data-fix]');
       if (!t) return;
@@ -553,7 +554,7 @@
       if (d.close) { proving = null; render(true); return; }
       if (d.ev) { const e2 = EVENTS.find((x) => x.k === d.ev); if (e2) { e2.run(); app.toast(e2.t); render(true); } return; }
       if (d.rearm) { rearm(d.rearm); render(true); return; }
-      if (d.fix === 'filtro') { const fid = d.fid || 'ac'; delete ev.filter[fid]; evLog(`${(sim.stationById(fid) || {}).shortName || fid}: cambio a filtro B, ΔP normal`); }
+      if (d.fix === 'filtro') { const fid = d.fid || 'ac'; delete ev.filter[fid]; if (equip) equip.unclog(fid); evLog(`${(sim.stationById(fid) || {}).shortName || fid}: cambio a filtro B, ΔP normal`); }
       if (d.fix === 'n2') { delete ev.n2.ph; evLog(`${HN}: presión de N2 repuesta`); }
       if (d.fix === 'clear') { app.normalOps(); Object.keys(ev.elec).forEach((k) => delete ev.elec[k]); ev.esd = {}; evLog('Escenario normalizado'); }
       render(true);
@@ -565,6 +566,8 @@
     });
 
     const ext = global.createIngExt ? global.createIngExt(app, { meters, qInd, evLog, setSub: (k) => setSub(k) }) : null;
+    const equip = global.createEquip ? global.createEquip(app, { TAGN, NAME, ev, evLog }) : null;
+    if (equip && app.alarms && app.alarms.addSource) app.alarms.addSource(() => equip.alarms());
     nav();
     setSub('principal');
 
@@ -580,6 +583,7 @@
           m.cum += qInd(m) * dtH;
         }
       }
+      if (equip) equip.update();
       eventTick();
       provingStep();
       if (ext) ext.update();
@@ -588,7 +592,7 @@
       if (acc > 0.5) { acc = 0; render(false); }
     }
 
-    return { update, resetEvents() { Object.keys(ev.elec).forEach((k) => delete ev.elec[k]); ev.filter = {}; ev.n2 = {}; ev.esd = {}; }, meters };
+    return { update, resetEvents() { Object.keys(ev.elec).forEach((k) => delete ev.elec[k]); ev.filter = {}; ev.n2 = {}; ev.esd = {}; if (equip) equip.reset(); }, meters, equip, ev };
   }
 
   global.createIng = createIng;

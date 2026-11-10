@@ -153,7 +153,7 @@
     const p1 = q('.x-intro-card h1 + p');
     if (p1) p1.textContent = `Ducto generado con el constructor: ${sim.state.stations.length} estaciones, ${sim.state.valves.length} válvulas de bloqueo, caño de ${M.diameterInch} in y destino en ${M.destName}. Física real sobre la altimetría del trazado.`;
     const b = $('x-build');
-    if (b) { b.textContent = 'Editar ducto'; b.href = 'constructor.html?id=' + encodeURIComponent(M.specId); }
+    if (b) { b.textContent = 'Editar ducto'; b.href = ((window.OB_LINKS || {}).builder || 'constructor.html') + '?id=' + encodeURIComponent(M.specId); }
   }
 
   function boot(e) {

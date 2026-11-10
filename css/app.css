@@ -630,3 +630,61 @@ body[data-ing-sub="clasica"] .ing-body { display: none; }
 .pg-eta.dest { border: 2px solid var(--sc-nav); background: #fffbd0; }
 .pg-eta.pass { opacity: 0.75; }
 .me-note.bad { color: var(--sc-bad); font-weight: 600; }
+
+/* ---------- SCADA · Equipos (v8) ---------- */
+.eq-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr)); gap: 10px; margin-top: 10px; }
+.eq-card { background: var(--sc-panel); border: 1px solid var(--sc-line); padding: 8px 10px 10px; min-width: 0; }
+.eq-card .sc-h3 { margin-top: 2px; }
+.eq-wide { grid-column: 1 / -1; }
+.eq-row { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: end; margin-bottom: 6px; }
+.eq-svg { width: 100%; height: auto; display: block; background: #e9eafb; border: 1px solid var(--sc-line); }
+.eq-t { font: 600 12px var(--f-mono); fill: var(--sc-ink); }
+.eq-ts { font: 600 10px var(--f-mono); fill: var(--sc-ink2); }
+.eq-w { stroke: #1d2a6b; stroke-width: 3; }
+.eq-w.off, .eq-bus.off { stroke: #9a9cb5; stroke-dasharray: 4 3; }
+.eq-bus { stroke: #1d2a6b; stroke-width: 6; }
+.eq-brk { fill: #fff; stroke: #1d2a6b; stroke-width: 2; }
+.eq-brk.on { fill: var(--sc-bad); }
+.eq-tr { fill: none; stroke: #1d2a6b; stroke-width: 2.5; }
+.eq-vfd { fill: #fff; stroke: #1d2a6b; stroke-width: 2; }
+.eq-vfd.on { fill: #b6f2b8; }
+.eq-vfd.bad { fill: var(--sc-bad); }
+.eq-mot { fill: #ff9a9a; stroke: #222; stroke-width: 2; }
+.eq-mot.on { fill: #8af08e; }
+.eq-filts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.eq-filt { background: #e9eafb; border: 2px solid var(--sc-line); padding: 8px; display: grid; gap: 4px; }
+.eq-filt.bad { border-color: var(--sc-bad); }
+.eq-filt.warn { border-color: var(--sc-warn); }
+.eq-filt-h { display: flex; justify-content: space-between; align-items: center; }
+.eq-filt-h b { font: 700 16px var(--f-display); }
+.eq-st { font: 700 11px var(--f-mono); padding: 2px 6px; background: #d6d8f5; border: 1px solid var(--sc-line); }
+.eq-st.ok { background: #b6f2b8; } .eq-st.warn { background: var(--sc-warn); } .eq-st.bad { background: var(--sc-bad); color: #fff; } .eq-st.info { background: #9fd3ff; }
+.eq-kv { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; }
+.eq-kv b { font: 700 13px var(--f-mono); }
+.eq-bar { position: relative; display: block; height: 10px; background: #fff; border: 1px solid var(--sc-line); }
+.eq-bar i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--sc-ok); }
+.eq-bar i.warn { background: var(--sc-warn); } .eq-bar i.bad { background: var(--sc-bad); }
+.eq-bar em { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--sc-warn); }
+.eq-bar em.a { background: var(--sc-bad); }
+.eq-lamp { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #9a9cb5; }
+.eq-curvewrap { display: grid; grid-template-columns: minmax(0, 420px) 1fr; gap: 12px; margin-top: 8px; align-items: start; }
+.eq-hq { fill: none; stroke: #1d2a6b; stroke-width: 2.5; }
+.eq-eff { fill: none; stroke: #8a6d00; stroke-width: 1.5; stroke-dasharray: 5 4; }
+.eq-ax { stroke: var(--sc-ink2); stroke-width: 1; }
+.eq-bep { stroke: var(--sc-ink2); stroke-dasharray: 3 3; }
+.eq-por { fill: rgba(34, 179, 58, 0.18); }
+.eq-aor { fill: rgba(90, 95, 156, 0.14); }
+.eq-op { fill: var(--sc-ok); stroke: #052; stroke-width: 2; }
+.eq-op.warn { fill: var(--sc-warn); } .eq-op.bad { fill: var(--sc-bad); }
+.eq-pipe { stroke: #1d2a6b; stroke-width: 6; fill: none; }
+.eq-pipe.thin { stroke-width: 3; }
+.eq-barrel { fill: #fff; stroke: #1d2a6b; stroke-width: 3; }
+.eq-barrel.on { fill: #ffd2ec; }
+.eq-xs { fill: #d6d8f5; stroke: #1d2a6b; stroke-width: 2; }
+.eq-xs.hit { fill: var(--sc-ok); animation: blink 1s steps(2) 6; }
+.eq-xs.wait { fill: var(--sc-yel); }
+.eq-bad { color: var(--sc-bad); }
+.me-table tr.sel td { background: #fff; }
+.me-table td.warn { background: var(--sc-warn); }
+.me-table td.bad { background: var(--sc-bad); color: #fff; }
+@media (max-width: 760px) { .eq-curvewrap, .eq-filts { grid-template-columns: 1fr; } }

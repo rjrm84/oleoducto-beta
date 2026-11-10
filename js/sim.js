@@ -1522,7 +1522,7 @@
         next.push({
           id: 'cascade-' + state.cascadeBlock.reason,
           severity: 'critical',
-          text: `Alcance hidráulico limitado (${state.cascadeBlock.reason}) · frente ~PK ${Number(state.oilReachablePkKm).toFixed(0)} — no sostiene hasta LC`,
+          text: `Alcance hidráulico limitado (${state.cascadeBlock.reason}) · frente ~PK ${Number(state.oilReachablePkKm).toFixed(0)} — no sostiene hasta ${(stationById('lc') || {}).shortName || 'LC'}`,
         });
       }
 
